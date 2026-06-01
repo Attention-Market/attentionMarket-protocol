@@ -2,3 +2,4 @@
 /frontend/node_modules
 /gateway/node_modules
 /frontend/.env
+/gateway/.env
