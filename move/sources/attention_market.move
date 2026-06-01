@@ -1,4 +1,5 @@
-
+/// AttentionMarket — Attention auction marketplace on Sui
+///
 /// Privacy model:
 ///   - Seller's real inbox is never on-chain. Only gateway_email (MX address) is public.
 ///   - Bidder's sender email stored and emitted as sha256(email) only.
@@ -6,7 +7,7 @@
 ///   - Conversations can be closed by the seller, invalidating the attention token permanently.
 ///     Gateway checks vault.closed_threads[payment_id] before forwarding any email.
 ///
-module spamshield::attention_market {
+module attentionmarket::attention_market {
     use sui::coin::{Self, Coin};
     use sui::sui::SUI;
     use sui::balance::{Self, Balance};
@@ -159,13 +160,11 @@ module spamshield::attention_market {
             total_bids:    0,
         });
     }
-
-    #[test_only]
+    
+  #[test_only]
     public fun init_for_testing(ctx: &mut TxContext) {
         init(ctx);
     }
-
-
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fun empty_slot(): Slot {
@@ -540,5 +539,6 @@ module spamshield::attention_market {
     public fun vault_owner(vault: &AttentionVault): address { vault.owner }
     public fun gateway_email(vault: &AttentionVault): &String { &vault.gateway_email }
     public fun registry_count(r: &Registry): u64            { r.total_sellers }
+    public fun registry_total_bids(r: &Registry): u64       { r.total_bids }
     public fun registry_vaults(r: &Registry): &vector<ID>   { &r.vault_ids }
 }

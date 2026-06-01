@@ -1,12 +1,12 @@
 #[test_only]
-module spamshield::attention_market_tests {
+module attentionmarket::attention_market_tests {
     use sui::test_scenario::{Self as ts, Scenario};
     use sui::coin;
     use sui::sui::SUI;
     use sui::test_utils::assert_eq;
     use std::string;
 
-    use spamshield::attention_market::{
+    use attentionmarket::attention_market::{
         Self,
         Registry,
         AttentionVault,
@@ -197,8 +197,8 @@ module spamshield::attention_market_tests {
             let registry = ts::take_shared<Registry>(&scenario);
             assert_eq(attention_market::slots_available(&vault), 2);
             assert_eq(attention_market::vault_balance(&vault),   1_000_000);
-            assert_eq(attention_market::total_bids(&vault),      1);
-            assert_eq(registry.total_bids,                       1); // access via module if exposed, else check via fun
+            assert_eq(attention_market::total_bids(&vault),         1);
+            assert_eq(attention_market::registry_total_bids(&registry), 1);
             ts::return_shared(vault);
             ts::return_shared(registry);
 
@@ -914,6 +914,7 @@ module spamshield::attention_market_tests {
             assert!(!attention_market::is_thread_closed(&vault, &b"any"),      0);
             assert!(!attention_market::is_whitelisted(&vault, &b"any"),        0);
             assert_eq(attention_market::registry_count(&registry),             1);
+            assert_eq(attention_market::registry_total_bids(&registry),        0);
             assert_eq(vector::length(attention_market::registry_vaults(&registry)), 1);
 
             ts::return_shared(vault);
