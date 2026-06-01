@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState,useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useCurrentAccount, useSignAndExecuteTransaction } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
@@ -7,7 +7,7 @@ import { Card, Btn, Input, Textarea, PageWrap, SectionLabel } from '../component
 
 export default function Register() {
   const account = useCurrentAccount()
-  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction()
+  
   const nav = useNavigate()
 
   const [form, setForm] = useState({
@@ -26,41 +26,56 @@ export default function Register() {
 
   const set = (k) => (v) => setForm(f => ({ ...f, [k]: v }))
 
-  async function submit() {
-    if (!account) return
-    setStep('signing')
-    setErrMsg('')
+ const { mutate: signAndExecuteTransaction } = useSignAndExecuteTransaction()
 
-    try {
-      const floorMist     = suiToMist(form.floorBid)
-      const slotsPerEpoch = parseInt(form.slotsPerEpoch) || 1
-      const epochDuration = parseInt(form.epochDuration) || 1
+const submitting = useRef(false)
 
-      const tx = new Transaction()
-      tx.moveCall({
-        target: `${PACKAGE_ID}::attention_market::register`,
-        arguments: [
-          tx.object(REGISTRY_ID),
-          tx.pure.string(form.name),
-          tx.pure.string(form.bio),
-          tx.pure.u8(form.category),
-          tx.pure.string(form.socialHandle),
-          tx.pure.string(form.gatewayEmail),
-          tx.pure.u64(slotsPerEpoch),
-          tx.pure.u64(epochDuration),
-          tx.pure.u64(floorMist),
-        ],
-      })
+function submit() {
+  
+   if (!account || submitting.current) return
+  submitting.current = true
+  setErrMsg('')
 
-      const res = await signAndExecute({ transaction: tx, options: { showEffects: true } })
-      setTxDigest(res.digest)
-      setStep('done')
-    } catch (e) {
-      console.error(e)
-      setErrMsg(e.message || 'Transaction failed')
-      setStep('error')
-    }
-  }
+  const floorMist     = suiToMist(form.floorBid)
+  const slotsPerEpoch = parseInt(form.slotsPerEpoch) || 1
+  const epochDuration = parseInt(form.epochDuration) || 1
+
+  const tx = new Transaction()
+  tx.moveCall({
+    target: `${PACKAGE_ID}::attention_market::register`,
+    arguments: [
+      tx.object(REGISTRY_ID),
+      tx.pure.string(form.name),
+      tx.pure.string(form.bio),
+      tx.pure.u8(form.category),
+      tx.pure.string(form.socialHandle),
+      tx.pure.string(form.gatewayEmail),
+      tx.pure.u64(slotsPerEpoch),
+      tx.pure.u64(epochDuration),
+      tx.pure.u64(floorMist),
+    ],
+  })
+
+  signAndExecuteTransaction(
+    { transaction: tx },
+    {
+      onSuccess: (result) => {
+        setTxDigest(result.digest)
+        setStep('done')
+        submitting.current = false
+      },
+      onError: (e) => {
+        console.error(e)
+        setErrMsg(e.message || 'Transaction failed')
+        setStep('error')
+        submitting.current = false
+      },
+    },
+  )
+
+  // Set signing state AFTER handing off to the wallet, not before
+  setStep('signing')
+}
 
   const valid = form.name.trim() && form.bio.trim() && form.gatewayEmail.includes('@') && parseFloat(form.floorBid) >= 0.001
 
