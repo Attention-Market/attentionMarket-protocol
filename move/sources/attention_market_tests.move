@@ -369,20 +369,36 @@ module attentionmarket::attention_market_tests {
         ts::end(scenario);
     }
 
+    // Note: EZeroBalance (code 4) in claim_refund requires outbid_address == sender
+    // AND pending_refund == 0 simultaneously. This state is unreachable via the
+    // public API because claim_refund always clears outbid_address to @0x0 on
+    // success, so a second call from the same sender hits ENotOwner instead.
+    // The test below covers the double-claim path, which is the closest observable
+    // behaviour to "nothing left to claim".
     #[test]
-    #[expected_failure(abort_code = attention_market::EZeroBalance)]
-    fun test_claim_refund_nothing_pending_fails() {
+    #[expected_failure(abort_code = attention_market::ENotOwner)]
+    fun test_claim_refund_double_claim_fails() {
         let mut scenario = setup_vault();
-        do_bid(&mut scenario, BIDDER1, 1_000_000, b"pid1", b"hash1");
 
-        // Slot 0 is filled but outbid_address is @0x0 — no pending refund
+        // Fill all slots then outbid BIDDER1 so slot 0 gets a pending refund
+        do_bid(&mut scenario, BIDDER1, 1_000_000, b"pid1", b"hash1");
+        do_bid(&mut scenario, BIDDER2, 2_000_000, b"pid2", b"hash2");
+        do_bid(&mut scenario, RANDO,   3_000_000, b"pid3", b"hash3");
+        do_bid(&mut scenario, SELLER,  5_000_000, b"pid4", b"hash4");
+
+        // First claim succeeds and clears outbid_address back to @0x0
         ts::next_tx(&mut scenario, BIDDER1);
         {
             let mut vault = ts::take_shared<AttentionVault>(&scenario);
-            // slot.outbid_address == @0x0 != BIDDER1 so this will abort ENotOwner,
-            // but to test EZeroBalance directly we need to craft the right state.
-            // Use BIDDER2 trying slot 1 which has @0x0 outbid and 0 balance.
-            attention_market::claim_refund(&mut vault, 1, ts::ctx(&mut scenario));
+            attention_market::claim_refund(&mut vault, 0, ts::ctx(&mut scenario));
+            ts::return_shared(vault);
+        };
+
+        // Second claim: outbid_address is now @0x0 != BIDDER1 → ENotOwner
+        ts::next_tx(&mut scenario, BIDDER1);
+        {
+            let mut vault = ts::take_shared<AttentionVault>(&scenario);
+            attention_market::claim_refund(&mut vault, 0, ts::ctx(&mut scenario));
             ts::return_shared(vault);
         };
 
