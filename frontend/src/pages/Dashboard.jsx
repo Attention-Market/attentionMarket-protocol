@@ -582,7 +582,7 @@ export default function Dashboard() {
                   Without it, anyone can still email <strong style={{ color: 'var(--text)', fontFamily: 'var(--font-mono)', fontSize: '11px' }}>{vault.gatewayEmail}</strong> for free.
                 </p>
                 <a
-                  href="https://deploy.workers.cloudflare.com/?url=<YOUR_REPO_URL>"
+                  href="https://deploy.workers.cloudflare.com/?url=https://github.com/Attention-Market/email-attention-gateway"
                   target="_blank"
                   rel="noopener noreferrer"
                 >
