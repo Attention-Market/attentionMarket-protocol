@@ -150,9 +150,9 @@ function submit() {
               fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)',
               lineHeight: '1.7', padding: '10px 14px', background: 'var(--bg2)', borderRadius: 'var(--r)',
             }}>
-              This is shown to auction winners so they know where to send their email.
-              Point your domain's MX record at your gateway server, then use that address here.
-              Your real inbox is never revealed.
+              Auction winners send to this address — your real inbox is never revealed.{' '}
+              Your domain must be on Cloudflare DNS. After registration, your dashboard will walk you
+              through deploying the Cloudflare Worker that enforces slot access.
             </div>
             <Textarea
               label="Bio — what kind of attention are you selling?"
