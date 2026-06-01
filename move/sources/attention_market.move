@@ -1,5 +1,4 @@
-/// AttentionMarket — Attention auction marketplace on Sui
-///
+
 /// Privacy model:
 ///   - Seller's real inbox is never on-chain. Only gateway_email (MX address) is public.
 ///   - Bidder's sender email stored and emitted as sha256(email) only.
@@ -28,7 +27,6 @@ module spamshield::attention_market {
     const EAlreadyWhitelisted: u64 = 6;
     const ENotWhitelisted:     u64 = 7;
     const EAlreadyClosed:      u64 = 8;
-    const EThreadNotFound:     u64 = 9;
 
     // ── Structs ───────────────────────────────────────────────────────────────
 
@@ -162,6 +160,12 @@ module spamshield::attention_market {
         });
     }
 
+    #[test_only]
+    public fun init_for_testing(ctx: &mut TxContext) {
+        init(ctx);
+    }
+
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fun empty_slot(): Slot {
@@ -210,7 +214,7 @@ module spamshield::attention_market {
 
     // ── Entry functions ───────────────────────────────────────────────────────
 
-    public entry fun register(
+    public fun register(
         registry:        &mut Registry,
         name:            String,
         bio:             String,
@@ -272,7 +276,7 @@ module spamshield::attention_market {
         transfer::transfer(VaultCap { id: object::new(ctx), vault_id }, ctx.sender());
     }
 
-    public entry fun bid(
+    public fun bid(
         registry:          &mut Registry,
         vault:             &mut AttentionVault,
         payment_id:        vector<u8>,
@@ -283,6 +287,8 @@ module spamshield::attention_market {
         let bid_amount = coin::value(&bid_coin);
         assert!(bid_amount >= vault.floor_bid, EBidTooLow);
 
+        // Capture vault_id up front — before any mutable borrow of vault fields.
+        let vault_id   = object::id(vault);
         let sender     = ctx.sender();
         let slot_index: u64;
 
@@ -306,7 +312,7 @@ module spamshield::attention_market {
             slot.outbid_address = outbid_address;
 
             event::emit(BidderOutbid {
-                vault_id: object::id(vault),
+                vault_id,
                 outbid_address,
                 refund_amount: outbid_amount,
                 slot_index,
@@ -324,7 +330,7 @@ module spamshield::attention_market {
 
         let receipt = AttentionReceipt {
             id:                object::new(ctx),
-            vault_id:          object::id(vault),
+            vault_id,
             seller:            vault.owner,
             seller_name:       vault.name,
             gateway_email:     vault.gateway_email,
@@ -338,7 +344,7 @@ module spamshield::attention_market {
         transfer::transfer(receipt, sender);
 
         event::emit(SlotWon {
-            vault_id:          object::id(vault),
+            vault_id,
             receipt_id,
             payment_id,
             sender_email_hash,
@@ -354,7 +360,7 @@ module spamshield::attention_market {
     /// Sets closed_threads[payment_id] = true on the vault.
     /// Gateway checks this before forwarding any email in either direction.
     /// Cannot be undone.
-    public entry fun close_conversation(
+    public fun close_conversation(
         vault:      &mut AttentionVault,
         cap:        &VaultCap,
         payment_id: vector<u8>,
@@ -373,7 +379,7 @@ module spamshield::attention_market {
         });
     }
 
-    public entry fun claim_refund(
+    public fun claim_refund(
         vault:      &mut AttentionVault,
         slot_index: u64,
         ctx:        &mut TxContext,
@@ -387,7 +393,7 @@ module spamshield::attention_market {
         transfer::public_transfer(refund, ctx.sender());
     }
 
-    public entry fun settle_epoch(
+    public fun settle_epoch(
         vault: &mut AttentionVault,
         cap:   &VaultCap,
         ctx:   &mut TxContext,
@@ -403,7 +409,7 @@ module spamshield::attention_market {
         };
         let total_collected = balance::value(&vault.balance);
 
-        while (!vector::is_empty(&mut vault.slots)) {
+        while (!vector::is_empty(&vault.slots)) {
             let Slot { bidder: _, amount: _, sender_email_hash: _, payment_id: _, outbid_address: _, pending_refund } = vector::pop_back(&mut vault.slots);
             balance::join(&mut vault.balance, pending_refund);
         };
@@ -426,7 +432,7 @@ module spamshield::attention_market {
         vault.epoch_start  = ctx.epoch();
     }
 
-    public entry fun withdraw(
+    public fun withdraw(
         vault: &mut AttentionVault,
         cap:   &VaultCap,
         ctx:   &mut TxContext,
@@ -440,7 +446,7 @@ module spamshield::attention_market {
         event::emit(FundsWithdrawn { seller: vault.owner, amount });
     }
 
-    public entry fun add_to_whitelist(
+    public fun add_to_whitelist(
         vault:             &mut AttentionVault,
         cap:               &VaultCap,
         sender_email_hash: vector<u8>,
@@ -452,7 +458,7 @@ module spamshield::attention_market {
         table::add(&mut vault.whitelist, sender_email_hash, true);
     }
 
-    public entry fun remove_from_whitelist(
+    public fun remove_from_whitelist(
         vault:             &mut AttentionVault,
         cap:               &VaultCap,
         sender_email_hash: vector<u8>,
@@ -464,7 +470,7 @@ module spamshield::attention_market {
         table::remove(&mut vault.whitelist, sender_email_hash);
     }
 
-    public entry fun update_profile(
+    public fun update_profile(
         vault:         &mut AttentionVault,
         cap:           &VaultCap,
         name:          String,
@@ -483,7 +489,7 @@ module spamshield::attention_market {
         vault.gateway_email = gateway_email;
     }
 
-    public entry fun update_auction_params(
+    public fun update_auction_params(
         vault:           &mut AttentionVault,
         cap:             &VaultCap,
         floor_bid:       u64,
