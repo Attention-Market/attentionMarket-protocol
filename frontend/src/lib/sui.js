@@ -1,6 +1,10 @@
-import { SuiClient, getFullnodeUrl } from '@mysten/sui/client'
+//sui.js
+import { SuiGrpcClient } from '@mysten/sui/grpc'
 
-export const client = new SuiClient({ url: getFullnodeUrl('testnet') })
+export const client = new SuiGrpcClient({
+  network: 'testnet',
+  baseUrl: 'https://fullnode.testnet.sui.io:443',
+})
 
 export const PACKAGE_ID  = import.meta.env.VITE_PACKAGE_ID  || ''
 export const REGISTRY_ID = import.meta.env.VITE_REGISTRY_ID || ''
@@ -29,21 +33,48 @@ export function suiToMist(sui) {
 
 /** Fetch the Registry object to get all vault IDs */
 export async function fetchRegistry() {
-  if (!REGISTRY_ID) return { vault_ids: [], total_sellers: 0, total_bids: 0 }
-  const obj = await client.getObject({ id: REGISTRY_ID, options: { showContent: true } })
-  const f = obj.data?.content?.fields
-  if (!f) return { vault_ids: [], total_sellers: 0, total_bids: 0 }
+  if (!REGISTRY_ID) {
+    return {
+      vault_ids: [],
+      total_sellers: 0,
+      total_bids: 0,
+    }
+  }
+
+  const { object } = await client.core.getObject({
+    objectId: REGISTRY_ID,
+    include: {
+      json: true,
+    },
+  })
+
+  const f = object?.json
+
+  if (!f) {
+    return {
+      vault_ids: [],
+      total_sellers: 0,
+      total_bids: 0,
+    }
+  }
+
   return {
-    vault_ids:     f.vault_ids || [],
+    vault_ids: f.vault_ids || [],
     total_sellers: Number(f.total_sellers),
-    total_bids:    Number(f.total_bids),
+    total_bids: Number(f.total_bids),
   }
 }
 
 /** Fetch a single AttentionVault by object ID */
 export async function fetchVault(id) {
-  const obj = await client.getObject({ id, options: { showContent: true } })
-  const f = obj.data?.content?.fields
+  const { object } = await client.core.getObject({
+  objectId: id,
+  include: {
+    json: true,
+  },
+})
+
+  const f = object?.json
   if (!f) return null
   return parseVaultFields(id, f)
 }
@@ -58,8 +89,7 @@ export async function fetchAllVaults(ids) {
 function parseVaultFields(id, f) {
   const slots = (f.slots || []).map(s => {
     const sf = s?.fields || s
-    // payment_id and sender_email_hash come back as arrays of numbers from RPC
-    const toHex = (arr) => arr ? Array.from(arr).map(b => b.toString(16).padStart(2,'0')).join('') : ''
+    const toHex = (arr) => arr ? Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('') : ''
     return {
       bidder:          sf.bidder,
       amount:          Number(sf.amount),
