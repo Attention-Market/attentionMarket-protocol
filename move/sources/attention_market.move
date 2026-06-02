@@ -1,7 +1,11 @@
 /// AttentionMarket — Attention auction marketplace on Sui
 ///
 /// Privacy model:
-///   - Seller's real inbox is never on-chain. Only gateway_email (MX address) is public.
+///   - Seller's real inbox is never on-chain in plaintext.
+///     It is stored as an ECDH/AES-GCM encrypted blob (three fields:
+///     encrypted_email_ephemeral_pubkey, encrypted_email_iv, encrypted_email_ciphertext).
+///     Only the holder of the corresponding private key (the gateway) can decrypt it.
+///   - gateway_email (public MX address) remains public as before.
 ///   - Bidder's sender email stored and emitted as sha256(email) only.
 ///   - payment_id = sha256(emailHash + ":" + vaultId) — gateway computes this from From: header.
 ///   - Conversations can be closed by the seller, invalidating the attention token permanently.
@@ -58,6 +62,13 @@ module attentionmarket::attention_market {
         social_handle:   String,
         /// Public MX-pointed address — shown to winners, routes to this gateway.
         gateway_email:   String,
+
+        // Encrypted real inbox — only gateway private key can decrypt.
+        // Produced by encrypt.js (ECDH ephemeral + AES-256-GCM).
+        // All three fields are raw bytes (Base64-decoded before storing).
+        encrypted_email_ephemeral_pubkey: vector<u8>,  // 65 bytes  (P-256 uncompressed)
+        encrypted_email_iv:               vector<u8>,  // 12 bytes  (AES-GCM nonce)
+        encrypted_email_ciphertext:       vector<u8>,  // n+16 bytes (ciphertext + GCM tag)
 
         // Auction state
         epoch:           u64,
@@ -160,11 +171,12 @@ module attentionmarket::attention_market {
             total_bids:    0,
         });
     }
-    
-  #[test_only]
+
+    #[test_only]
     public fun init_for_testing(ctx: &mut TxContext) {
         init(ctx);
     }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fun empty_slot(): Slot {
@@ -213,17 +225,29 @@ module attentionmarket::attention_market {
 
     // ── Entry functions ───────────────────────────────────────────────────────
 
+    /// Register a new seller vault.
+    ///
+    /// The three `encrypted_email_*` parameters come directly from encrypt.js:
+    ///   - ephemeral_pubkey  → Base64-decoded bytes of `result.ephemeralPublicKey`
+    ///   - iv                → Base64-decoded bytes of `result.iv`
+    ///   - ciphertext        → Base64-decoded bytes of `result.ciphertext`
+    ///
+    /// Only the gateway (holder of PRIVATE_KEY) can recover the plaintext email
+    /// by passing these three fields to decrypt.js.
     public fun register(
-        registry:        &mut Registry,
-        name:            String,
-        bio:             String,
-        category:        u8,
-        social_handle:   String,
-        gateway_email:   String,
-        slots_per_epoch: u64,
-        epoch_duration:  u64,
-        floor_bid:       u64,
-        ctx:             &mut TxContext,
+        registry:                         &mut Registry,
+        name:                             String,
+        bio:                              String,
+        category:                         u8,
+        social_handle:                    String,
+        gateway_email:                    String,
+        encrypted_email_ephemeral_pubkey: vector<u8>,
+        encrypted_email_iv:               vector<u8>,
+        encrypted_email_ciphertext:       vector<u8>,
+        slots_per_epoch:                  u64,
+        epoch_duration:                   u64,
+        floor_bid:                        u64,
+        ctx:                              &mut TxContext,
     ) {
         assert!(floor_bid >= GLOBAL_FLOOR, EBelowGlobalFloor);
         assert!(slots_per_epoch > 0 && slots_per_epoch <= MAX_SLOTS, ETooManySlots);
@@ -243,6 +267,9 @@ module attentionmarket::attention_market {
             category,
             social_handle,
             gateway_email,
+            encrypted_email_ephemeral_pubkey,
+            encrypted_email_iv,
+            encrypted_email_ciphertext,
             epoch:           0,
             epoch_start:     ctx.epoch(),
             epoch_duration,
@@ -275,6 +302,24 @@ module attentionmarket::attention_market {
         transfer::transfer(VaultCap { id: object::new(ctx), vault_id }, ctx.sender());
     }
 
+    /// Update the encrypted real inbox. Call this if the seller rotates their
+    /// email address — re-encrypt the new address with encrypt.js and pass the
+    /// new blob here.
+    public fun update_encrypted_email(
+        vault:                            &mut AttentionVault,
+        cap:                              &VaultCap,
+        encrypted_email_ephemeral_pubkey: vector<u8>,
+        encrypted_email_iv:               vector<u8>,
+        encrypted_email_ciphertext:       vector<u8>,
+        ctx:                              &mut TxContext,
+    ) {
+        assert!(cap.vault_id == object::id(vault), ENotOwner);
+        assert!(ctx.sender() == vault.owner, ENotOwner);
+        vault.encrypted_email_ephemeral_pubkey = encrypted_email_ephemeral_pubkey;
+        vault.encrypted_email_iv               = encrypted_email_iv;
+        vault.encrypted_email_ciphertext       = encrypted_email_ciphertext;
+    }
+
     public fun bid(
         registry:          &mut Registry,
         vault:             &mut AttentionVault,
@@ -286,7 +331,6 @@ module attentionmarket::attention_market {
         let bid_amount = coin::value(&bid_coin);
         assert!(bid_amount >= vault.floor_bid, EBidTooLow);
 
-        // Capture vault_id up front — before any mutable borrow of vault fields.
         let vault_id   = object::id(vault);
         let sender     = ctx.sender();
         let slot_index: u64;
@@ -355,10 +399,6 @@ module attentionmarket::attention_market {
         });
     }
 
-    /// Seller closes a conversation thread permanently.
-    /// Sets closed_threads[payment_id] = true on the vault.
-    /// Gateway checks this before forwarding any email in either direction.
-    /// Cannot be undone.
     public fun close_conversation(
         vault:      &mut AttentionVault,
         cap:        &VaultCap,
@@ -507,7 +547,18 @@ module attentionmarket::attention_market {
 
     // ── Read-only ─────────────────────────────────────────────────────────────
 
-    /// Gateway calls this to check if a thread is closed before forwarding.
+    /// Returns the three encrypted email blobs. Pass these directly to decrypt.js:
+    ///   { ephemeralPublicKey: toBase64(ephemeral_pubkey),
+    ///     iv:                 toBase64(iv),
+    ///     ciphertext:         toBase64(ciphertext) }
+    public fun encrypted_email(vault: &AttentionVault): (vector<u8>, vector<u8>, vector<u8>) {
+        (
+            vault.encrypted_email_ephemeral_pubkey,
+            vault.encrypted_email_iv,
+            vault.encrypted_email_ciphertext,
+        )
+    }
+
     public fun is_thread_closed(vault: &AttentionVault, payment_id: &vector<u8>): bool {
         table::contains(&vault.closed_threads, *payment_id)
     }

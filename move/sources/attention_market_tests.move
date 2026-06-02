@@ -20,6 +20,23 @@ module attentionmarket::attention_market_tests {
     const BIDDER2: address = @0xCC;
     const RANDO:   address = @0xDD;
 
+    // ── Dummy encrypted email blobs (not real crypto — tests only) ────────────
+    // Mimics the three fields produced by encrypt.js:
+    //   ephemeral_pubkey  = 65 zero bytes  (P-256 uncompressed point placeholder)
+    //   iv                = 12 zero bytes  (AES-GCM nonce placeholder)
+    //   ciphertext        = 32 zero bytes  (ciphertext+tag placeholder)
+    fun dummy_ephemeral_pubkey(): vector<u8> { vector[
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    ] }
+    fun dummy_iv(): vector<u8> { vector[0,0,0,0,0,0,0,0,0,0,0,0] }
+    fun dummy_ciphertext(): vector<u8> { vector[
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    ] }
+
     // ── Shared helpers ────────────────────────────────────────────────────────
 
     /// Register a vault with sensible defaults and return the scenario.
@@ -42,8 +59,11 @@ module attentionmarket::attention_market_tests {
                 1,
                 string::utf8(b"@alice"),
                 string::utf8(b"alice@gateway.example"),
-                3,   // slots_per_epoch
-                100, // epoch_duration
+                dummy_ephemeral_pubkey(),
+                dummy_iv(),
+                dummy_ciphertext(),
+                3,         // slots_per_epoch
+                100,       // epoch_duration
                 1_000_000, // floor_bid = GLOBAL_FLOOR
                 ts::ctx(&mut scenario),
             );
@@ -112,6 +132,23 @@ module attentionmarket::attention_market_tests {
     }
 
     #[test]
+    fun test_register_stores_encrypted_email() {
+        let mut scenario = setup_vault();
+
+        ts::next_tx(&mut scenario, SELLER);
+        {
+            let vault = ts::take_shared<AttentionVault>(&scenario);
+            let (epk, iv, ct) = attention_market::encrypted_email(&vault);
+            assert_eq(vector::length(&epk), 65);
+            assert_eq(vector::length(&iv),  12);
+            assert_eq(vector::length(&ct),  32);
+            ts::return_shared(vault);
+        };
+
+        ts::end(scenario);
+    }
+
+    #[test]
     #[expected_failure(abort_code = attention_market::EBelowGlobalFloor)]
     fun test_register_floor_below_global_floor_fails() {
         let mut scenario = ts::begin(SELLER);
@@ -126,6 +163,9 @@ module attentionmarket::attention_market_tests {
                 1,
                 string::utf8(b"@alice"),
                 string::utf8(b"alice@gw"),
+                dummy_ephemeral_pubkey(),
+                dummy_iv(),
+                dummy_ciphertext(),
                 3, 100,
                 999_999, // 1 below floor
                 ts::ctx(&mut scenario),
@@ -150,6 +190,9 @@ module attentionmarket::attention_market_tests {
                 1,
                 string::utf8(b"@alice"),
                 string::utf8(b"alice@gw"),
+                dummy_ephemeral_pubkey(),
+                dummy_iv(),
+                dummy_ciphertext(),
                 0, 100, 1_000_000, // 0 slots
                 ts::ctx(&mut scenario),
             );
@@ -173,6 +216,9 @@ module attentionmarket::attention_market_tests {
                 1,
                 string::utf8(b"@alice"),
                 string::utf8(b"alice@gw"),
+                dummy_ephemeral_pubkey(),
+                dummy_iv(),
+                dummy_ciphertext(),
                 101, 100, 1_000_000, // 101 > MAX_SLOTS
                 ts::ctx(&mut scenario),
             );
@@ -279,7 +325,6 @@ module attentionmarket::attention_market_tests {
             let vault = ts::take_shared<AttentionVault>(&scenario);
             // Slots still full; balance = 2+3+4 = 9_000_000 (BIDDER1's 1M moved to pending_refund)
             assert_eq(attention_market::slots_available(&vault), 0);
-            // BIDDER1's refund is pending in the slot's pending_refund, not in vault.balance
             // vault.balance = 2M + 3M + 4M = 9M
             assert_eq(attention_market::vault_balance(&vault), 9_000_000);
             ts::return_shared(vault);
@@ -369,18 +414,11 @@ module attentionmarket::attention_market_tests {
         ts::end(scenario);
     }
 
-    // Note: EZeroBalance (code 4) in claim_refund requires outbid_address == sender
-    // AND pending_refund == 0 simultaneously. This state is unreachable via the
-    // public API because claim_refund always clears outbid_address to @0x0 on
-    // success, so a second call from the same sender hits ENotOwner instead.
-    // The test below covers the double-claim path, which is the closest observable
-    // behaviour to "nothing left to claim".
     #[test]
     #[expected_failure(abort_code = attention_market::ENotOwner)]
     fun test_claim_refund_double_claim_fails() {
         let mut scenario = setup_vault();
 
-        // Fill all slots then outbid BIDDER1 so slot 0 gets a pending refund
         do_bid(&mut scenario, BIDDER1, 1_000_000, b"pid1", b"hash1");
         do_bid(&mut scenario, BIDDER2, 2_000_000, b"pid2", b"hash2");
         do_bid(&mut scenario, RANDO,   3_000_000, b"pid3", b"hash3");
@@ -430,7 +468,6 @@ module attentionmarket::attention_market_tests {
             let vault = ts::take_shared<AttentionVault>(&scenario);
             assert_eq(attention_market::current_epoch(&vault),   1);
             assert_eq(attention_market::slots_available(&vault), 3);
-            // total_earned accumulated
             assert_eq(attention_market::total_earned(&vault), 5_000_000);
             ts::return_shared(vault);
         };
@@ -622,7 +659,74 @@ module attentionmarket::attention_market_tests {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // 8. whitelist
+    // 8. update_encrypted_email
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fun test_update_encrypted_email_replaces_blobs() {
+        let mut scenario = setup_vault();
+
+        // Build a distinct replacement blob (all 0xFF bytes)
+        let new_epk = vector[
+            255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+            255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+            255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+            255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+        ];
+        let new_iv  = vector[255,255,255,255,255,255,255,255,255,255,255,255];
+        let new_ct  = vector[
+            255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+            255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255
+        ];
+
+        ts::next_tx(&mut scenario, SELLER);
+        {
+            let mut vault = ts::take_shared<AttentionVault>(&scenario);
+            let cap       = ts::take_from_address<VaultCap>(&scenario, SELLER);
+            attention_market::update_encrypted_email(
+                &mut vault, &cap,
+                new_epk,
+                new_iv,
+                new_ct,
+                ts::ctx(&mut scenario),
+            );
+            let (epk, iv, ct) = attention_market::encrypted_email(&vault);
+            // First byte of each field should now be 255, not 0
+            assert_eq(*vector::borrow(&epk, 0), 255u8);
+            assert_eq(*vector::borrow(&iv,  0), 255u8);
+            assert_eq(*vector::borrow(&ct,  0), 255u8);
+            ts::return_shared(vault);
+            ts::return_to_address(SELLER, cap);
+        };
+
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = attention_market::ENotOwner)]
+    fun test_update_encrypted_email_non_owner_fails() {
+        let mut scenario = setup_vault();
+
+        ts::next_tx(&mut scenario, RANDO);
+        {
+            let mut vault = ts::take_shared<AttentionVault>(&scenario);
+            let cap       = ts::take_from_address<VaultCap>(&scenario, SELLER);
+            attention_market::update_encrypted_email(
+                &mut vault, &cap,
+                dummy_ephemeral_pubkey(),
+                dummy_iv(),
+                dummy_ciphertext(),
+                ts::ctx(&mut scenario),
+            );
+            ts::return_shared(vault);
+            ts::return_to_address(SELLER, cap);
+        };
+
+        ts::end(scenario);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // 9. whitelist
     // ══════════════════════════════════════════════════════════════════════════
 
     #[test]
@@ -714,7 +818,7 @@ module attentionmarket::attention_market_tests {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // 9. update_profile
+    // 10. update_profile
     // ══════════════════════════════════════════════════════════════════════════
 
     #[test]
@@ -771,7 +875,7 @@ module attentionmarket::attention_market_tests {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // 10. update_auction_params
+    // 11. update_auction_params
     // ══════════════════════════════════════════════════════════════════════════
 
     #[test]
@@ -858,7 +962,7 @@ module attentionmarket::attention_market_tests {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // 11. Multi-epoch lifecycle
+    // 12. Multi-epoch lifecycle
     // ══════════════════════════════════════════════════════════════════════════
 
     #[test]
@@ -896,8 +1000,8 @@ module attentionmarket::attention_market_tests {
         {
             let vault = ts::take_shared<AttentionVault>(&scenario);
             assert_eq(attention_market::current_epoch(&vault),   1);
-            assert_eq(attention_market::total_earned(&vault),    5_000_000); // only epoch 0 settled so far
-            assert_eq(attention_market::vault_balance(&vault),   4_000_000); // epoch 1 bid live
+            assert_eq(attention_market::total_earned(&vault),    5_000_000);
+            assert_eq(attention_market::vault_balance(&vault),   4_000_000);
             assert_eq(attention_market::total_bids(&vault),      3);
             ts::return_shared(vault);
         };
@@ -906,7 +1010,7 @@ module attentionmarket::attention_market_tests {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // 12. Read-only accessors (smoke test)
+    // 13. Read-only accessors (smoke test)
     // ══════════════════════════════════════════════════════════════════════════
 
     #[test]
@@ -933,6 +1037,12 @@ module attentionmarket::attention_market_tests {
             assert_eq(attention_market::registry_total_bids(&registry),        0);
             assert_eq(vector::length(attention_market::registry_vaults(&registry)), 1);
 
+            // Encrypted email blobs are present and correctly sized
+            let (epk, iv, ct) = attention_market::encrypted_email(&vault);
+            assert_eq(vector::length(&epk), 65);
+            assert_eq(vector::length(&iv),  12);
+            assert_eq(vector::length(&ct),  32);
+
             ts::return_shared(vault);
             ts::return_shared(registry);
         };
@@ -940,3 +1050,4 @@ module attentionmarket::attention_market_tests {
         ts::end(scenario);
     }
 }
+
