@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { fetchRegistry, fetchAllVaults, CATEGORIES, mistToSui } from '../lib/sui.js'
 import SellerCard from '../components/SellerCard.jsx'
 import { Logo, Spinner, Tag, StatNum, PageWrap } from '../components/ui.jsx'
-
+ 
 export default function Market() {
   const [vaults, setVaults]     = useState([])
   const [registry, setRegistry] = useState(null)
@@ -11,11 +11,11 @@ export default function Market() {
   const [category, setCategory] = useState(null) // null = all
   const [sort, setSort]         = useState('price_asc') // price_asc | price_desc | slots | bids
   const nav = useNavigate()
-
+ 
   useEffect(() => {
     load()
   }, [])
-
+ 
   async function load() {
     setLoading(true)
     try {
@@ -29,7 +29,7 @@ export default function Market() {
       setLoading(false)
     }
   }
-
+ 
   const filtered = vaults
     .filter(v => category === null || v.category === category)
     .sort((a, b) => {
@@ -39,7 +39,7 @@ export default function Market() {
       if (sort === 'bids')       return b.totalBids - a.totalBids
       return 0
     })
-
+ 
   return (
     <div>
       {/* Hero */}
@@ -63,7 +63,7 @@ export default function Market() {
           <StatNum value={vaults.filter(v => v.slotsAvailable > 0).length || '—'} label="Open now" accent="var(--teal)" />
         </div>
       </div>
-
+ 
       <PageWrap>
         {/* Filters */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px', gap: '12px', flexWrap: 'wrap' }}>
@@ -81,7 +81,7 @@ export default function Market() {
               >{c.emoji} {c.label}</button>
             ))}
           </div>
-
+ 
           {/* Sort */}
           <select
             value={sort}
@@ -98,7 +98,7 @@ export default function Market() {
             <option value="bids">Most popular</option>
           </select>
         </div>
-
+ 
         {/* Grid */}
         {loading ? (
           <div style={{ display: 'flex', justifyContent: 'center', padding: '80px 0' }}>
@@ -132,10 +132,18 @@ export default function Market() {
             gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
             gap: '16px',
           }}>
-            {filtered.map(v => <SellerCard key={v.id} vault={v} />)}
+            {filtered.map(v => (
+              <div
+                key={v.id}
+                onClick={() => nav(`/profile/${v.id}`)}
+                style={{ cursor: 'pointer' }}
+              >
+                <SellerCard vault={v} />
+              </div>
+            ))}
           </div>
         )}
-
+ 
         {/* CTA */}
         {!loading && vaults.length > 0 && (
           <div style={{
@@ -163,7 +171,7 @@ export default function Market() {
     </div>
   )
 }
-
+ 
 function filterBtn(active) {
   return {
     background: active ? 'var(--accent)' : 'var(--bg2)',
@@ -174,3 +182,4 @@ function filterBtn(active) {
     transition: 'all 0.15s', whiteSpace: 'nowrap',
   }
 }
+ 
