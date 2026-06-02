@@ -32,15 +32,19 @@ module attentionmarket::attention_market {
     const EAlreadyWhitelisted: u64 = 6;
     const ENotWhitelisted:     u64 = 7;
     const EAlreadyClosed:      u64 = 8;
-    const EVaultClosed:        u64 = 9;
+    const EVaultClosed:           u64 = 9;
+    const EDuplicateGatewayEmail: u64 = 10;
 
     // ── Structs ───────────────────────────────────────────────────────────────
 
     public struct Registry has key {
-        id:            UID,
-        vault_ids:     vector<ID>,
-        total_sellers: u64,
-        total_bids:    u64,
+        id:             UID,
+        vault_ids:      vector<ID>,
+        total_sellers:  u64,
+        total_bids:     u64,
+        /// Uniqueness index: gateway_email → vault ID that owns it.
+        /// Checked on register() and update_profile(); released on close_vault().
+        gateway_emails: Table<String, ID>,
     }
 
     public struct Slot has store {
@@ -175,10 +179,11 @@ module attentionmarket::attention_market {
 
     fun init(ctx: &mut TxContext) {
         transfer::share_object(Registry {
-            id:            object::new(ctx),
-            vault_ids:     vector::empty(),
-            total_sellers: 0,
-            total_bids:    0,
+            id:             object::new(ctx),
+            vault_ids:      vector::empty(),
+            total_sellers:  0,
+            total_bids:     0,
+            gateway_emails: table::new(ctx),
         });
     }
 
@@ -259,6 +264,7 @@ module attentionmarket::attention_market {
     ) {
         assert!(floor_bid >= GLOBAL_FLOOR, EBelowGlobalFloor);
         assert!(slots_per_epoch > 0 && slots_per_epoch <= MAX_SLOTS, ETooManySlots);
+        assert!(!table::contains(&registry.gateway_emails, gateway_email), EDuplicateGatewayEmail);
 
         let mut slots = vector::empty<Slot>();
         let mut i = 0;
@@ -306,6 +312,7 @@ module attentionmarket::attention_market {
 
         vector::push_back(&mut registry.vault_ids, vault_id);
         registry.total_sellers = registry.total_sellers + 1;
+        table::add(&mut registry.gateway_emails, vault.gateway_email, vault_id);
 
         transfer::share_object(vault);
         transfer::transfer(VaultCap { id: object::new(ctx), vault_id }, ctx.sender());
@@ -425,6 +432,7 @@ module attentionmarket::attention_market {
     /// This is intentional — it forces the seller to explicitly acknowledge
     /// outstanding conversations before deletion.
     public fun close_vault(
+        registry: &mut Registry,
         vault: AttentionVault,
         cap:   VaultCap,
         ctx:   &mut TxContext,
@@ -442,7 +450,7 @@ module attentionmarket::attention_market {
             bio: _,
             category: _,
             social_handle: _,
-            gateway_email: _,
+            gateway_email,
             encrypted_email_ephemeral_pubkey: _,
             encrypted_email_iv: _,
             encrypted_email_ciphertext: _,
@@ -512,6 +520,11 @@ module attentionmarket::attention_market {
         // closed_threads: destroy_empty aborts if any threads were closed but
         // not accounted for — this is the intended safety check.
         table::destroy_empty(closed_threads);
+
+        // ── Release gateway email handle from the registry index ──────────────
+        if (table::contains(&registry.gateway_emails, gateway_email)) {
+            table::remove(&mut registry.gateway_emails, gateway_email);
+        };
 
         // ── Emit & delete ─────────────────────────────────────────────────────
         event::emit(VaultClosed {
@@ -639,6 +652,7 @@ module attentionmarket::attention_market {
     }
 
     public fun update_profile(
+        registry:      &mut Registry,
         vault:         &mut AttentionVault,
         cap:           &VaultCap,
         name:          String,
@@ -650,6 +664,15 @@ module attentionmarket::attention_market {
     ) {
         assert!(cap.vault_id == object::id(vault), ENotOwner);
         assert!(ctx.sender() == vault.owner, ENotOwner);
+
+        // Only enforce uniqueness if the email is actually changing
+        if (gateway_email != vault.gateway_email) {
+            assert!(!table::contains(&registry.gateway_emails, gateway_email), EDuplicateGatewayEmail);
+            // Release old handle, claim new one
+            table::remove(&mut registry.gateway_emails, vault.gateway_email);
+            table::add(&mut registry.gateway_emails, gateway_email, object::id(vault));
+        };
+
         vault.name          = name;
         vault.bio           = bio;
         vault.category      = category;
@@ -717,4 +740,8 @@ module attentionmarket::attention_market {
     public fun registry_count(r: &Registry): u64            { r.total_sellers }
     public fun registry_total_bids(r: &Registry): u64       { r.total_bids }
     public fun registry_vaults(r: &Registry): &vector<ID>   { &r.vault_ids }
+    /// Returns true if the given gateway_email is already registered.
+    public fun registry_email_taken(r: &Registry, email: String): bool {
+        table::contains(&r.gateway_emails, email)
+    }
 }

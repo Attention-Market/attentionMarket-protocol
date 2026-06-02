@@ -509,7 +509,9 @@ module attentionmarket::attention_market_tests {
         {
             let vault = ts::take_shared<AttentionVault>(&scenario);
             let cap   = ts::take_from_address<VaultCap>(&scenario, SELLER);
-            attention_market::close_vault(vault, cap, ts::ctx(&mut scenario));
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::close_vault(&mut registry, vault, cap, ts::ctx(&mut scenario));
+            ts::return_shared(registry);
             // vault and cap are consumed — no return needed
         };
         ts::end(scenario);
@@ -527,7 +529,9 @@ module attentionmarket::attention_market_tests {
         {
             let vault = ts::take_shared<AttentionVault>(&scenario);
             let cap   = ts::take_from_address<VaultCap>(&scenario, SELLER);
-            attention_market::close_vault(vault, cap, ts::ctx(&mut scenario));
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::close_vault(&mut registry, vault, cap, ts::ctx(&mut scenario));
+            ts::return_shared(registry);
         };
 
         // Both bidders should have received refund coins
@@ -556,7 +560,9 @@ module attentionmarket::attention_market_tests {
         {
             let vault = ts::take_shared<AttentionVault>(&scenario);
             let cap   = ts::take_from_address<VaultCap>(&scenario, SELLER);
-            attention_market::close_vault(vault, cap, ts::ctx(&mut scenario));
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::close_vault(&mut registry, vault, cap, ts::ctx(&mut scenario));
+            ts::return_shared(registry);
         };
 
         ts::next_tx(&mut scenario, BIDDER1);
@@ -586,7 +592,9 @@ module attentionmarket::attention_market_tests {
         {
             let vault = ts::take_shared<AttentionVault>(&scenario);
             let cap   = ts::take_from_address<VaultCap>(&scenario, SELLER);
-            attention_market::close_vault(vault, cap, ts::ctx(&mut scenario));
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::close_vault(&mut registry, vault, cap, ts::ctx(&mut scenario));
+            ts::return_shared(registry);
         };
 
         ts::next_tx(&mut scenario, SELLER);
@@ -614,7 +622,9 @@ module attentionmarket::attention_market_tests {
             let vault = ts::take_shared<AttentionVault>(&scenario);
             let cap   = ts::take_from_address<VaultCap>(&scenario, SELLER);
             // Should succeed even though whitelist is non-empty
-            attention_market::close_vault(vault, cap, ts::ctx(&mut scenario));
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::close_vault(&mut registry, vault, cap, ts::ctx(&mut scenario));
+            ts::return_shared(registry);
         };
         ts::end(scenario);
     }
@@ -643,7 +653,9 @@ module attentionmarket::attention_market_tests {
             let vault = ts::take_shared<AttentionVault>(&scenario);
             let cap   = ts::take_from_address<VaultCap>(&scenario, SELLER);
             // Aborts because closed_threads is non-empty
-            attention_market::close_vault(vault, cap, ts::ctx(&mut scenario));
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::close_vault(&mut registry, vault, cap, ts::ctx(&mut scenario));
+            ts::return_shared(registry);
         };
 
         ts::end(scenario);
@@ -657,7 +669,9 @@ module attentionmarket::attention_market_tests {
         {
             let vault = ts::take_shared<AttentionVault>(&scenario);
             let cap   = ts::take_from_address<VaultCap>(&scenario, SELLER);
-            attention_market::close_vault(vault, cap, ts::ctx(&mut scenario));
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::close_vault(&mut registry, vault, cap, ts::ctx(&mut scenario));
+            ts::return_shared(registry);
         };
         ts::end(scenario);
     }
@@ -897,12 +911,14 @@ module attentionmarket::attention_market_tests {
         {
             let mut vault = ts::take_shared<AttentionVault>(&scenario);
             let cap       = ts::take_from_address<VaultCap>(&scenario, SELLER);
+            let mut registry = ts::take_shared<Registry>(&scenario);
             attention_market::update_profile(
-                &mut vault, &cap,
+                &mut registry, &mut vault, &cap,
                 string::utf8(b"Alice v2"), string::utf8(b"New bio"),
                 2, string::utf8(b"@alice2"), string::utf8(b"alice2@gw"),
                 ts::ctx(&mut scenario),
             );
+            ts::return_shared(registry);
             assert_eq(*attention_market::gateway_email(&vault), string::utf8(b"alice2@gw"));
             ts::return_shared(vault);
             ts::return_to_address(SELLER, cap);
@@ -918,12 +934,14 @@ module attentionmarket::attention_market_tests {
         {
             let mut vault = ts::take_shared<AttentionVault>(&scenario);
             let cap       = ts::take_from_address<VaultCap>(&scenario, SELLER);
+            let mut registry = ts::take_shared<Registry>(&scenario);
             attention_market::update_profile(
-                &mut vault, &cap,
+                &mut registry, &mut vault, &cap,
                 string::utf8(b"Hacker"), string::utf8(b""),
                 0, string::utf8(b""), string::utf8(b""),
                 ts::ctx(&mut scenario),
             );
+            ts::return_shared(registry);
             ts::return_shared(vault);
             ts::return_to_address(SELLER, cap);
         };
@@ -1068,6 +1086,221 @@ module attentionmarket::attention_market_tests {
             assert_eq(vector::length(&ct),  32);
 
             ts::return_shared(vault);
+            ts::return_shared(registry);
+        };
+        ts::end(scenario);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // 15. Gateway email uniqueness
+    // ══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fun test_registry_email_taken_after_register() {
+        let mut scenario = setup_vault();
+        ts::next_tx(&mut scenario, SELLER);
+        {
+            let registry = ts::take_shared<Registry>(&scenario);
+            assert!(
+                attention_market::registry_email_taken(
+                    &registry, string::utf8(b"alice@gateway.example"),
+                ),
+                0,
+            );
+            assert!(
+                !attention_market::registry_email_taken(
+                    &registry, string::utf8(b"bob@gateway.example"),
+                ),
+                0,
+            );
+            ts::return_shared(registry);
+        };
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = attention_market::EDuplicateGatewayEmail)]
+    fun test_register_duplicate_gateway_email_fails() {
+        let mut scenario = setup_vault(); // registers alice@gateway.example
+        ts::next_tx(&mut scenario, BIDDER1);
+        {
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::register(
+                &mut registry,
+                string::utf8(b"Bob"),
+                string::utf8(b"Bio"),
+                1,
+                string::utf8(b"@bob"),
+                string::utf8(b"alice@gateway.example"), // duplicate
+                dummy_ephemeral_pubkey(),
+                dummy_iv(),
+                dummy_ciphertext(),
+                3, 100, 1_000_000,
+                ts::ctx(&mut scenario),
+            );
+            ts::return_shared(registry);
+        };
+        ts::end(scenario);
+    }
+
+    #[test]
+    fun test_update_profile_to_new_email_releases_old_handle() {
+        let mut scenario = setup_vault();
+        ts::next_tx(&mut scenario, SELLER);
+        {
+            let mut vault    = ts::take_shared<AttentionVault>(&scenario);
+            let cap          = ts::take_from_address<VaultCap>(&scenario, SELLER);
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::update_profile(
+                &mut registry, &mut vault, &cap,
+                string::utf8(b"Alice"), string::utf8(b"Bio"),
+                1, string::utf8(b"@alice"),
+                string::utf8(b"alice-new@gateway.example"),
+                ts::ctx(&mut scenario),
+            );
+            assert!(
+                !attention_market::registry_email_taken(
+                    &registry, string::utf8(b"alice@gateway.example"),
+                ),
+                0,
+            );
+            assert!(
+                attention_market::registry_email_taken(
+                    &registry, string::utf8(b"alice-new@gateway.example"),
+                ),
+                0,
+            );
+            ts::return_shared(vault);
+            ts::return_shared(registry);
+            ts::return_to_address(SELLER, cap);
+        };
+        ts::end(scenario);
+    }
+
+    #[test]
+    fun test_update_profile_same_email_is_allowed() {
+        let mut scenario = setup_vault();
+        ts::next_tx(&mut scenario, SELLER);
+        {
+            let mut vault    = ts::take_shared<AttentionVault>(&scenario);
+            let cap          = ts::take_from_address<VaultCap>(&scenario, SELLER);
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::update_profile(
+                &mut registry, &mut vault, &cap,
+                string::utf8(b"Alice v2"), string::utf8(b"New bio"),
+                1, string::utf8(b"@alice"),
+                string::utf8(b"alice@gateway.example"), // same email — must succeed
+                ts::ctx(&mut scenario),
+            );
+            assert_eq(*attention_market::gateway_email(&vault), string::utf8(b"alice@gateway.example"));
+            ts::return_shared(vault);
+            ts::return_shared(registry);
+            ts::return_to_address(SELLER, cap);
+        };
+        ts::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = attention_market::EDuplicateGatewayEmail)]
+    fun test_update_profile_to_taken_email_fails() {
+        let mut scenario = setup_vault(); // SELLER -> alice@gateway.example
+        ts::next_tx(&mut scenario, BIDDER1);
+        {
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::register(
+                &mut registry,
+                string::utf8(b"Bob"),
+                string::utf8(b"Bio"),
+                1,
+                string::utf8(b"@bob"),
+                string::utf8(b"bob@gateway.example"),
+                dummy_ephemeral_pubkey(),
+                dummy_iv(),
+                dummy_ciphertext(),
+                3, 100, 1_000_000,
+                ts::ctx(&mut scenario),
+            );
+            ts::return_shared(registry);
+        };
+        // BIDDER1 tries to steal alice's handle via update_profile
+        ts::next_tx(&mut scenario, BIDDER1);
+        {
+            let cap          = ts::take_from_address<VaultCap>(&scenario, BIDDER1);
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            // Most recently created vault is BIDDER1's
+            let mut vault = ts::take_shared<AttentionVault>(&scenario);
+            attention_market::update_profile(
+                &mut registry, &mut vault, &cap,
+                string::utf8(b"Bob"), string::utf8(b"Bio"),
+                1, string::utf8(b"@bob"),
+                string::utf8(b"alice@gateway.example"), // taken by SELLER
+                ts::ctx(&mut scenario),
+            );
+            ts::return_shared(vault);
+            ts::return_shared(registry);
+            ts::return_to_address(BIDDER1, cap);
+        };
+        ts::end(scenario);
+    }
+
+    #[test]
+    fun test_close_vault_releases_email_handle() {
+        let mut scenario = setup_vault();
+        ts::next_tx(&mut scenario, SELLER);
+        {
+            let vault        = ts::take_shared<AttentionVault>(&scenario);
+            let cap          = ts::take_from_address<VaultCap>(&scenario, SELLER);
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::close_vault(&mut registry, vault, cap, ts::ctx(&mut scenario));
+            assert!(
+                !attention_market::registry_email_taken(
+                    &registry, string::utf8(b"alice@gateway.example"),
+                ),
+                0,
+            );
+            ts::return_shared(registry);
+        };
+        ts::end(scenario);
+    }
+
+    #[test]
+    fun test_email_handle_reusable_after_close() {
+        let mut scenario = setup_vault();
+        ts::next_tx(&mut scenario, SELLER);
+        {
+            let vault        = ts::take_shared<AttentionVault>(&scenario);
+            let cap          = ts::take_from_address<VaultCap>(&scenario, SELLER);
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::close_vault(&mut registry, vault, cap, ts::ctx(&mut scenario));
+            ts::return_shared(registry);
+        };
+        ts::next_tx(&mut scenario, BIDDER1);
+        {
+            let mut registry = ts::take_shared<Registry>(&scenario);
+            attention_market::register(
+                &mut registry,
+                string::utf8(b"Alice2"),
+                string::utf8(b"Bio"),
+                1,
+                string::utf8(b"@alice2"),
+                string::utf8(b"alice@gateway.example"), // now free
+                dummy_ephemeral_pubkey(),
+                dummy_iv(),
+                dummy_ciphertext(),
+                3, 100, 1_000_000,
+                ts::ctx(&mut scenario),
+            );
+            ts::return_shared(registry);
+        };
+        ts::next_tx(&mut scenario, BIDDER1);
+        {
+            let registry = ts::take_shared<Registry>(&scenario);
+            assert!(
+                attention_market::registry_email_taken(
+                    &registry, string::utf8(b"alice@gateway.example"),
+                ),
+                0,
+            );
             ts::return_shared(registry);
         };
         ts::end(scenario);
