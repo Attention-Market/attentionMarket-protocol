@@ -32,6 +32,7 @@ export default function Nav() {
             {link('/', 'Market')}
             {link('/register', 'Sell')}
             {account && link('/dashboard', 'Dashboard')}
+            {account && link("/receipts","Receipts")}
           </div>
         </div>
         <ConnectButton />
