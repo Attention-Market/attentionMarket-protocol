@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useCurrentAccount, useSignAndExecuteTransaction } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
 import { sha256 } from 'js-sha256'
-import { fetchVault, categoryById, mistToSui, suiToMist, PACKAGE_ID, REGISTRY_ID } from '../lib/sui.js'
+import { fetchVault, fetchEpochInfo, categoryById, mistToSui, suiToMist, PACKAGE_ID, REGISTRY_ID } from '../lib/sui.js'
 import { Card, Btn, Input, Tag, Spinner, PageWrap, SectionLabel, StatNum } from '../components/ui.jsx'
 
 function hexToBytes(hex) {
@@ -12,6 +12,94 @@ function hexToBytes(hex) {
     bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
   }
   return Array.from(bytes)
+}
+
+// Given vault fields and live epoch info, compute the ms timestamp when
+// bidding closes: when the Sui epoch reaches (vault.epochStart + vault.epochDuration).
+function computeDeadlineMs(vault, epochInfo) {
+  const { currentEpoch, epochStartMs, epochDurationMs } = epochInfo
+  const deadlineEpoch = vault.epochStart + vault.epochDuration
+  const epochsRemaining = deadlineEpoch - currentEpoch
+  // Current epoch started at epochStartMs and lasts epochDurationMs.
+  // Each subsequent epoch also lasts epochDurationMs (approximation — close enough).
+  return epochStartMs + epochsRemaining * epochDurationMs
+}
+
+function formatCountdown(msLeft) {
+  if (msLeft <= 0) return null
+  const totalSec = Math.floor(msLeft / 1000)
+  const d = Math.floor(totalSec / 86400)
+  const h = Math.floor((totalSec % 86400) / 3600)
+  const m = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  if (d > 0) return `${d}d ${h}h ${m}m`
+  if (h > 0) return `${h}h ${m}m ${s}s`
+  return `${m}m ${s}s`
+}
+
+// Countdown banner shown above the bid form
+function EpochTimer({ vault, epochInfo }) {
+  const [msLeft, setMsLeft] = useState(null)
+  const timerRef = useRef(null)
+
+  useEffect(() => {
+    if (!vault || !epochInfo) return
+    const deadline = computeDeadlineMs(vault, epochInfo)
+
+    function tick() {
+      setMsLeft(deadline - Date.now())
+    }
+    tick()
+    timerRef.current = setInterval(tick, 1000)
+    return () => clearInterval(timerRef.current)
+  }, [vault, epochInfo])
+
+  if (msLeft === null) return null
+
+  const expired  = msLeft <= 0
+  const urgentMs = 6 * 60 * 60 * 1000  // last 6 hours → amber
+  const urgent   = !expired && msLeft < urgentMs
+
+  const bg     = expired ? 'color-mix(in srgb, var(--red) 8%, transparent)'
+               : urgent  ? 'color-mix(in srgb, var(--amber) 8%, transparent)'
+               :           'color-mix(in srgb, var(--teal) 8%, transparent)'
+  const border = expired ? 'color-mix(in srgb, var(--red) 25%, transparent)'
+               : urgent  ? 'color-mix(in srgb, var(--amber) 25%, transparent)'
+               :           'color-mix(in srgb, var(--teal) 25%, transparent)'
+  const color  = expired ? 'var(--red)'
+               : urgent  ? 'var(--amber)'
+               :           'var(--teal)'
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      gap: '12px', padding: '12px 16px', marginBottom: '20px',
+      background: bg, border: `1px solid ${border}`, borderRadius: 'var(--r)',
+    }}>
+      <div>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '3px' }}>
+          {expired ? 'Bidding closed' : 'Bidding closes in'}
+        </div>
+        {expired ? (
+          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color, fontWeight: 600 }}>
+            Epoch ended — awaiting seller to settle
+          </div>
+        ) : (
+          <div style={{ fontFamily: 'var(--font-display)', fontSize: '22px', fontWeight: 800, color, letterSpacing: '-0.01em' }}>
+            {formatCountdown(msLeft)}
+          </div>
+        )}
+      </div>
+      <div style={{ textAlign: 'right', flexShrink: 0 }}>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '3px' }}>
+          Epoch
+        </div>
+        <div style={{ fontFamily: 'var(--font-mono)', fontSize: '13px', color: 'var(--text2)', fontWeight: 600 }}>
+          {vault.epoch}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function SlotRow({ slot, index }) {
@@ -48,7 +136,7 @@ function BidSuccessPanel({ txDigest }) {
         Bid placed!
       </div>
       <p style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text2)', lineHeight: '1.8', marginBottom: '24px', maxWidth: '360px', margin: '0 auto 24px' }}>
-        You're in the running. When the seller closes this epoch, a receipt will
+        You're in the running. When the seller settles this epoch, a receipt will
         appear in your wallet and on your receipts page — that's when you can
         generate your delivery token.
       </p>
@@ -70,27 +158,40 @@ export default function Profile() {
   const { vaultId }  = useParams()
   const nav          = useNavigate()
   const account      = useCurrentAccount()
+  
   const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction()
 
-  const [vault, setVault]         = useState(null)
-  const [loading, setLoading]     = useState(true)
-  const [bidEmail, setBidEmail]   = useState('')
-  const [bidAmount, setBidAmount] = useState('')
-  const [step, setStep]           = useState('idle') // idle | bidding | placed | error
-  const [txDigest, setTxDigest]   = useState('')
-  const [errMsg, setErrMsg]       = useState('')
+  const [vault,      setVault]      = useState(null)
+  const [epochInfo,  setEpochInfo]  = useState(null)
+  const [loading,    setLoading]    = useState(true)
+  const [bidEmail,   setBidEmail]   = useState('')
+  const [bidAmount,  setBidAmount]  = useState('')
+  const [step,       setStep]       = useState('idle') // idle | bidding | placed | error
+  const [txDigest,   setTxDigest]   = useState('')
+  const [errMsg,     setErrMsg]     = useState('')
 
   useEffect(() => { load() }, [vaultId])
 
   async function load() {
     setLoading(true)
-    try { setVault(await fetchVault(vaultId)) }
-    catch (e) { console.error(e) }
+    try {
+      const [v, ei] = await Promise.all([
+        fetchVault(vaultId),
+        fetchEpochInfo(),
+      ])
+      setVault(v)
+      setEpochInfo(ei)
+    } catch (e) { console.error(e) }
     finally { setLoading(false) }
   }
 
+  // Epoch expired when current Sui epoch >= epochStart + epochDuration
+  const epochExpired = epochInfo && vault
+    ? epochInfo.currentEpoch >= vault.epochStart + vault.epochDuration
+    : false
+
   async function placeBid() {
-    if (!account || !vault || !bidEmail || !bidAmount) return
+    if (!account || !vault || !bidEmail || !bidAmount || epochExpired) return
     setStep('bidding')
     setErrMsg('')
     try {
@@ -151,7 +252,9 @@ export default function Profile() {
         <div style={{ flex: 1 }}>
           <div style={{ fontFamily: 'var(--font-display)', fontSize: '26px', fontWeight: 800, marginBottom: '6px' }}>{vault.name}</div>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-            <Tag color={full ? 'var(--red)' : 'var(--teal)'}>{full ? 'All slots full' : `${vault.slotsAvailable} of ${vault.slotsPerEpoch} open`}</Tag>
+            <Tag color={epochExpired ? 'var(--red)' : full ? 'var(--amber)' : 'var(--teal)'}>
+              {epochExpired ? 'Bidding closed' : full ? 'All slots full' : `${vault.slotsAvailable} of ${vault.slotsPerEpoch} open`}
+            </Tag>
             <Tag>{cat.emoji} {cat.label}</Tag>
             {vault.socialHandle && <Tag color="var(--text2)">@{vault.socialHandle}</Tag>}
           </div>
@@ -184,7 +287,7 @@ export default function Profile() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
           {vault.slots.map((slot, i) => <SlotRow key={i} slot={slot} index={i} />)}
         </div>
-        {full && (
+        {!epochExpired && full && (
           <div style={{
             marginTop: '10px', padding: '10px 14px',
             background: 'color-mix(in srgb, var(--amber) 8%, transparent)',
@@ -205,61 +308,86 @@ export default function Profile() {
           <BidSuccessPanel txDigest={txDigest} />
         ) : (
           <>
-            <p style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text2)', marginBottom: '20px', lineHeight: '1.7' }}>
-              Win a slot and {vault.name} will receive your email.
-              Minimum bid: <strong style={{ color: 'var(--accent)' }}>{minBid} SUI</strong>.
-              {full && ' All slots full — outbid the lowest holder to take their slot.'}
-            </p>
+            {/* Countdown timer */}
+            <EpochTimer vault={vault} epochInfo={epochInfo} />
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <div>
-                <Input
-                  label="Your email address"
-                  value={bidEmail}
-                  onChange={setBidEmail}
-                  placeholder="you@example.com"
-                  type="email"
-                />
-                <div style={{
-                  display: 'flex', alignItems: 'flex-start', gap: '7px',
-                  marginTop: '8px', padding: '8px 12px',
-                  background: 'color-mix(in srgb, var(--teal) 8%, transparent)',
-                  border: '1px solid color-mix(in srgb, var(--teal) 25%, transparent)',
-                  borderRadius: 'var(--r)',
-                }}>
-                  <span style={{ fontSize: '13px', flexShrink: 0, marginTop: '1px' }}>🔒</span>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', lineHeight: '1.7' }}>
-                    Hashed with SHA-256 before submission —{' '}
-                    <strong style={{ color: 'var(--teal)' }}>never stored on-chain in plaintext.</strong>
-                  </span>
+            {epochExpired ? (
+              /* Epoch over — bidding locked */
+              <div style={{
+                padding: '20px', borderRadius: 'var(--r)',
+                background: 'color-mix(in srgb, var(--red) 6%, transparent)',
+                border: '1px solid color-mix(in srgb, var(--red) 20%, transparent)',
+                textAlign: 'center',
+              }}>
+                <div style={{ fontSize: '28px', marginBottom: '10px' }}>🔒</div>
+                <div style={{ fontFamily: 'var(--font-display)', fontSize: '16px', fontWeight: 700, color: 'var(--red)', marginBottom: '8px' }}>
+                  Bidding is closed for this epoch
+                </div>
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text3)', lineHeight: '1.7' }}>
+                  The seller will settle the epoch and mint receipts to all winners.
+                  A new bidding round will open after that.
                 </div>
               </div>
+            ) : (
+              /* Bidding open */
+              <>
+                <p style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text2)', marginBottom: '20px', lineHeight: '1.7' }}>
+                  Win a slot and {vault.name} will receive your email.
+                  Minimum bid: <strong style={{ color: 'var(--accent)' }}>{minBid} SUI</strong>.
+                  {full && ' All slots full — outbid the lowest holder to take their slot.'}
+                </p>
 
-              <Input
-                label={`Bid amount (min ${minBid} SUI)`}
-                value={bidAmount}
-                onChange={setBidAmount}
-                placeholder={minBid}
-                mono
-              />
-            </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                  <div>
+                    <Input
+                      label="Your email address"
+                      value={bidEmail}
+                      onChange={setBidEmail}
+                      placeholder="you@example.com"
+                      type="email"
+                    />
+                    <div style={{
+                      display: 'flex', alignItems: 'flex-start', gap: '7px',
+                      marginTop: '8px', padding: '8px 12px',
+                      background: 'color-mix(in srgb, var(--teal) 8%, transparent)',
+                      border: '1px solid color-mix(in srgb, var(--teal) 25%, transparent)',
+                      borderRadius: 'var(--r)',
+                    }}>
+                      <span style={{ fontSize: '13px', flexShrink: 0, marginTop: '1px' }}>🔒</span>
+                      <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', lineHeight: '1.7' }}>
+                        Hashed with SHA-256 before submission —{' '}
+                        <strong style={{ color: 'var(--teal)' }}>never stored on-chain in plaintext.</strong>
+                      </span>
+                    </div>
+                  </div>
 
-            {step === 'error' && (
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--red)', marginTop: '14px', wordBreak: 'break-word' }}>{errMsg}</div>
+                  <Input
+                    label={`Bid amount (min ${minBid} SUI)`}
+                    value={bidAmount}
+                    onChange={setBidAmount}
+                    placeholder={minBid}
+                    mono
+                  />
+                </div>
+
+                {step === 'error' && (
+                  <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--red)', marginTop: '14px', wordBreak: 'break-word' }}>{errMsg}</div>
+                )}
+
+                <div style={{ marginTop: '20px' }}>
+                  {!account
+                    ? <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text3)' }}>Connect your wallet to bid</div>
+                    : <Btn onClick={placeBid} disabled={!bidValid || step === 'bidding'} style={{ width: '100%', padding: '13px' }}>
+                        {step === 'bidding' ? 'Confirm in wallet…' : `Bid ${bidAmount || '—'} SUI →`}
+                      </Btn>
+                  }
+                </div>
+
+                <p style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', marginTop: '14px', lineHeight: '1.6' }}>
+                  Receipts are issued when the seller settles the epoch. If outbid, your SUI is refunded immediately.
+                </p>
+              </>
             )}
-
-            <div style={{ marginTop: '20px' }}>
-              {!account
-                ? <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text3)' }}>Connect your wallet to bid</div>
-                : <Btn onClick={placeBid} disabled={!bidValid || step === 'bidding'} style={{ width: '100%', padding: '13px' }}>
-                    {step === 'bidding' ? 'Confirm in wallet…' : `Bid ${bidAmount || '—'} SUI →`}
-                  </Btn>
-              }
-            </div>
-
-            <p style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', marginTop: '14px', lineHeight: '1.6' }}>
-              Receipts are issued when the seller closes the epoch. If outbid, your SUI is refunded immediately.
-            </p>
           </>
         )}
       </Card>

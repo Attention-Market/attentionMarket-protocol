@@ -1,4 +1,3 @@
-//sui.js
 import { SuiGrpcClient } from '@mysten/sui/grpc'
 
 export const client = new SuiGrpcClient({
@@ -31,49 +30,45 @@ export function suiToMist(sui) {
   return BigInt(Math.ceil(parseFloat(sui) * 1e9))
 }
 
+/**
+ * Fetch current Sui epoch info for countdown calculations.
+ * Uses client.core.getCurrentSystemState() which returns systemState
+ * with epoch, epochStartTimestampMs, and epochDurationMs.
+ */
+export async function fetchEpochInfo() {
+  const res = await client.core.getCurrentSystemState()
+  const s   = res.systemState
+  return {
+    currentEpoch:    Number(s.epoch),
+    epochStartMs:    Number(s.epochStartTimestampMs),
+    epochDurationMs: Number(s.parameters?.epochDurationMs ?? s.epochDurationMs),
+  }
+}
+
 /** Fetch the Registry object to get all vault IDs */
 export async function fetchRegistry() {
   if (!REGISTRY_ID) {
-    return {
-      vault_ids: [],
-      total_sellers: 0,
-      total_bids: 0,
-    }
+    return { vault_ids: [], total_sellers: 0, total_bids: 0 }
   }
-
   const { object } = await client.core.getObject({
     objectId: REGISTRY_ID,
-    include: {
-      json: true,
-    },
+    include: { json: true },
   })
-
   const f = object?.json
-
-  if (!f) {
-    return {
-      vault_ids: [],
-      total_sellers: 0,
-      total_bids: 0,
-    }
-  }
-
+  if (!f) return { vault_ids: [], total_sellers: 0, total_bids: 0 }
   return {
-    vault_ids: f.vault_ids || [],
+    vault_ids:     f.vault_ids || [],
     total_sellers: Number(f.total_sellers),
-    total_bids: Number(f.total_bids),
+    total_bids:    Number(f.total_bids),
   }
 }
 
 /** Fetch a single AttentionVault by object ID */
 export async function fetchVault(id) {
   const { object } = await client.core.getObject({
-  objectId: id,
-  include: {
-    json: true,
-  },
-})
-
+    objectId: id,
+    include: { json: true },
+  })
   const f = object?.json
   if (!f) return null
   return parseVaultFields(id, f)
@@ -89,19 +84,21 @@ export async function fetchAllVaults(ids) {
 function parseVaultFields(id, f) {
   const slots = (f.slots || []).map(s => {
     const sf = s?.fields || s
-    const toHex = (arr) => arr ? Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('') : ''
+    const toHex = (arr) => arr
+      ? Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('')
+      : ''
     return {
       bidder:          sf.bidder,
       amount:          Number(sf.amount),
       senderEmailHash: toHex(sf.sender_email_hash),
       paymentId:       toHex(sf.payment_id),
-      outbidAddress:   sf.outbid_address,
-      hasPending:      Number(sf.pending_refund?.fields?.value || 0) > 0,
     }
   })
 
-  const filledSlots = slots.filter(s => s.bidder !== '0x0000000000000000000000000000000000000000000000000000000000000000')
-  const lowestBid   = filledSlots.length < slots.length
+  const filledSlots = slots.filter(
+    s => s.bidder !== '0x0000000000000000000000000000000000000000000000000000000000000000'
+  )
+  const lowestBid = filledSlots.length < slots.length
     ? Number(f.floor_bid)
     : filledSlots.length > 0
       ? Math.min(...filledSlots.map(s => s.amount))
@@ -116,6 +113,7 @@ function parseVaultFields(id, f) {
     socialHandle:   f.social_handle,
     gatewayEmail:   f.gateway_email,
     epoch:          Number(f.epoch),
+    epochStart:     Number(f.epoch_start),
     epochDuration:  Number(f.epoch_duration),
     slotsPerEpoch:  Number(f.slots_per_epoch),
     floorBid:       Number(f.floor_bid),
