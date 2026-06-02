@@ -16,18 +16,18 @@ export default function Register() {
   const nav = useNavigate()
 
   const [form, setForm] = useState({
-    name:          '',
-    bio:           '',
-    category:      0,
-    socialHandle:  '',
+    name: '',
+    bio: '',
+    category: 0,
+    socialHandle: '',
     gatewayHandle: '',   // just the part before @attention.email
-    realEmail:     '',   // never leaves the browser in plaintext
+    realEmail: '',   // never leaves the browser in plaintext
     slotsPerEpoch: '3',
     epochDuration: '1',
-    floorBid:      '0.01',
+    floorBid: '0.01',
   })
-  const [step, setStep]         = useState('idle')   // idle | encrypting | signing | done | error
-  const [errMsg, setErrMsg]     = useState('')
+  const [step, setStep] = useState('idle')   // idle | encrypting | signing | done | error
+  const [errMsg, setErrMsg] = useState('')
   const [txDigest, setTxDigest] = useState('')
 
   const set = (k) => (v) => setForm(f => ({ ...f, [k]: v }))
@@ -47,11 +47,11 @@ export default function Register() {
 
       // Convert Base64 → raw bytes for vector<u8> Move arguments
       const epkBytes = base64ToBytes(ephemeralPublicKey)
-      const ivBytes  = base64ToBytes(iv)
-      const ctBytes  = base64ToBytes(ciphertext)
+      const ivBytes = base64ToBytes(iv)
+      const ctBytes = base64ToBytes(ciphertext)
 
       // ── 2. Build the transaction ──────────────────────────────────────────
-      const floorMist     = suiToMist(form.floorBid)
+      const floorMist = suiToMist(form.floorBid)
       const slotsPerEpoch = parseInt(form.slotsPerEpoch) || 1
       const epochDuration = parseInt(form.epochDuration) || 1
 
@@ -118,7 +118,7 @@ export default function Register() {
           You're live on the market!
         </div>
         <p style={{ fontFamily: 'var(--font-body)', color: 'var(--text2)', lineHeight: '1.7', marginBottom: '24px' }}>
-          Your attention vault is deployed. 
+          Your attention vault is deployed.
         </p>
         <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
           <a
@@ -298,19 +298,42 @@ export default function Register() {
               placeholder="3"
               mono
             />
-            <Input
-              label="Epoch duration (Sui epochs, 1 ≈ 24h)"
-              value={form.epochDuration}
-              onChange={set('epochDuration')}
-              placeholder="1"
-              mono
-            />
+
+            {/* Epoch duration with inline explainer */}
+            <div>
+              <Input
+                label="Epoch duration (number of Sui epochs)"
+                value={form.epochDuration}
+                onChange={set('epochDuration')}
+                placeholder="7"
+                mono
+              />
+              <div style={{
+                marginTop: '8px', padding: '10px 12px',
+                background: 'color-mix(in srgb, var(--accent) 6%, transparent)',
+                border: '1px solid color-mix(in srgb, var(--accent) 20%, transparent)',
+                borderRadius: 'var(--r)',
+                display: 'flex', flexDirection: 'column', gap: '5px',
+              }}>
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text2)', lineHeight: '1.7' }}>
+                  ⏱ <strong style={{ color: 'var(--text)' }}>1 Sui epoch ≈ 24 hours</strong>, but epochs roll over at a fixed network time —
+                  not from the moment you register. If you create a vault with duration&nbsp;1 at 23:00,
+                  bidding may close in as little as 1 hour.
+                </div>
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', lineHeight: '1.7' }}>
+                  → Set <strong style={{ color: 'var(--text2)' }}>7</strong> for a guaranteed ~7-day window regardless of when you register.
+                  After each epoch ends, you settle it to mint receipts and open the next round.
+                </div>
+              </div>
+            </div>
+
+            {/* Summary */}
             <div style={{
               background: 'var(--bg2)', borderRadius: 'var(--r)', padding: '14px 16px',
               fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text2)', lineHeight: '1.8',
             }}>
               <strong style={{ color: 'var(--text)' }}>Summary:</strong><br />
-              {parseInt(form.slotsPerEpoch) || 1} senders can bid per ~{parseInt(form.epochDuration) || 1} day period.<br />
+              {parseInt(form.slotsPerEpoch) || 1} slot{(parseInt(form.slotsPerEpoch) || 1) !== 1 ? 's' : ''} available per epoch (~{parseInt(form.epochDuration) || 1} day{(parseInt(form.epochDuration) || 1) !== 1 ? 's' : ''}).<br />
               Minimum bid: {parseFloat(form.floorBid) || 0} SUI per slot.<br />
               Max revenue per epoch: ~{((parseInt(form.slotsPerEpoch) || 1) * (parseFloat(form.floorBid) || 0)).toFixed(3)} SUI (at floor price).
             </div>
@@ -338,8 +361,8 @@ export default function Register() {
             style={{ width: '100%', padding: '14px', fontSize: '16px' }}
           >
             {step === 'encrypting' ? '🔒 Encrypting email…'
-              : step === 'signing'  ? 'Confirm in wallet…'
-              : 'Deploy my attention vault →'}
+              : step === 'signing' ? 'Confirm in wallet…'
+                : 'Deploy my attention vault →'}
           </Btn>
         )}
 
