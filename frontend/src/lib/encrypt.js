@@ -6,7 +6,7 @@
 //   // result = { ephemeralPublicKey: '...', iv: '...', ciphertext: '...' }
 //   // All fields are Base64 strings, safe to store as-is on SUI.
 
-const PUBLIC_KEY = import.meta.env.PUBLIC_KEY; // e.g. Vite/Astro
+const PUBLIC_KEY = import.meta.env.VITE_PUBLIC_KEY; // e.g. Vite/Astro
 // If using plain HTML, replace with:
 // const PUBLIC_KEY = window.ENV_PUBLIC_KEY;
 
