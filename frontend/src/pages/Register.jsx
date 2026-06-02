@@ -151,7 +151,7 @@ export default function Register() {
         </div>
         <p style={{ fontFamily: 'var(--font-body)', color: 'var(--text2)', lineHeight: '1.7' }}>
           Set your price, define your slots, and let people bid for your inbox.
-          Your real email stays private — only your gateway knows it.
+          Your real email stays hidden — only our private gateway knows it.
         </p>
       </div>
 
