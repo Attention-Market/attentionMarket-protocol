@@ -5,7 +5,7 @@ import { Transaction } from '@mysten/sui/transactions'
 import { PACKAGE_ID, REGISTRY_ID, CATEGORIES, suiToMist } from '../lib/sui.js'
 import { encryptEmail } from '../lib/encrypt.js'
 import { Card, Btn, Input, Textarea, PageWrap, SectionLabel } from '../components/ui.jsx'
-
+import { bcs } from '@mysten/sui/bcs'
 // Base64 string → Uint8Array (needed to pass encrypted blobs as vector<u8>)
 function base64ToBytes(b64) {
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
@@ -118,17 +118,8 @@ export default function Register() {
           You're live on the market!
         </div>
         <p style={{ fontFamily: 'var(--font-body)', color: 'var(--text2)', lineHeight: '1.7', marginBottom: '24px' }}>
-          Your attention vault is deployed. Now run your gateway so you can receive emails from auction winners.
+          Your attention vault is deployed. 
         </p>
-        <Card style={{ padding: '20px', marginBottom: '24px', textAlign: 'left' }}>
-          <SectionLabel>Next steps</SectionLabel>
-          <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text2)', lineHeight: '2' }}>
-            1. Copy your vault ID from the transaction<br />
-            2. Set <code style={{ color: 'var(--accent)' }}>RECIPIENT_VAULT_ID</code> in gateway/.env<br />
-            3. Run <code style={{ color: 'var(--accent)' }}>npm start</code> in the gateway folder<br />
-            4. Point your domain MX at your gateway server
-          </div>
-        </Card>
         <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
           <a
             href={`https://suiscan.xyz/testnet/tx/${txDigest}`}
