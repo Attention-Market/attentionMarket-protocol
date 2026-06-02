@@ -1,15 +1,17 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { useCurrentAccount, useSignAndExecuteTransaction, useSignPersonalMessage } from '@mysten/dapp-kit'
+import { useCurrentAccount, useSignAndExecuteTransaction } from '@mysten/dapp-kit'
 import { Transaction } from '@mysten/sui/transactions'
 import { sha256 } from 'js-sha256'
 import { fetchVault, categoryById, mistToSui, suiToMist, PACKAGE_ID, REGISTRY_ID } from '../lib/sui.js'
 import { Card, Btn, Input, Tag, Spinner, PageWrap, SectionLabel, StatNum } from '../components/ui.jsx'
 
-// The message the winner signs — must match what the gateway verifies.
-// Format: "AttentionMarket:<vaultId>:<paymentId>"
-function buildSignMessage(vaultId, paymentId) {
-  return `AttentionMarket:${vaultId}:${paymentId}`
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2)
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
+  }
+  return Array.from(bytes)
 }
 
 function SlotRow({ slot, index }) {
@@ -37,152 +39,28 @@ function SlotRow({ slot, index }) {
   )
 }
 
-function CopyBox({ value }) {
-  const [copied, setCopied] = useState(false)
-  function copy() {
-    navigator.clipboard.writeText(value)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
+function BidSuccessPanel({ txDigest }) {
+  const nav = useNavigate()
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: '8px',
-      background: 'var(--bg)', border: '1px solid var(--border2)',
-      borderRadius: 'var(--r)', padding: '10px 14px',
-    }}>
-      <span style={{
-        fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--accent)',
-        flex: 1, wordBreak: 'break-all',
-      }}>{value}</span>
-      <button
-        onClick={copy}
-        style={{
-          background: copied ? 'var(--teal)22' : 'var(--bg2)',
-          border: `1px solid ${copied ? 'var(--teal)' : 'var(--border2)'}`,
-          borderRadius: '4px', padding: '4px 10px', cursor: 'pointer',
-          fontFamily: 'var(--font-mono)', fontSize: '11px',
-          color: copied ? 'var(--teal)' : 'var(--text2)',
-          whiteSpace: 'nowrap', transition: 'all 0.15s', flexShrink: 0,
-        }}
-      >{copied ? 'copied ✓' : 'copy'}</button>
-    </div>
-  )
-}
-
-// Shown after winning — two-step: confirm bid tx, then sign delivery auth
-function WonPanel({ vaultId, paymentId, txDigest, sellerName, gatewayEmail }) {
-  const { mutateAsync: signPersonalMessage } = useSignPersonalMessage()
-  const [sigStep, setSigStep] = useState('ready') // ready | signing | done | error
-  const [subjectTag, setSubjectTag] = useState('')
-  const [errMsg, setErrMsg] = useState('')
-
-  async function sign() {
-    setSigStep('signing')
-    setErrMsg('')
-    try {
-      const message = buildSignMessage(vaultId, paymentId)
-      const msgBytes = new TextEncoder().encode(message)
-      const { signature } = await signPersonalMessage({ message: msgBytes })
-      // signature is base64url — the gateway will verify this
-      const tag = `[attn:${signature}]`
-      setSubjectTag(tag)
-      setSigStep('done')
-    } catch (e) {
-      setErrMsg(e.message || 'Signing failed')
-      setSigStep('error')
-    }
-  }
-
-  return (
-    <div style={{ padding: '4px 0' }}>
-      <div style={{ textAlign: 'center', marginBottom: '24px' }}>
-        <div style={{ fontSize: '36px', marginBottom: '10px' }}>🎉</div>
-        <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '18px', color: 'var(--teal)', marginBottom: '6px' }}>
-          Slot won!
-        </div>
-        <a
-          href={`https://suiscan.xyz/testnet/tx/${txDigest}`}
-          target="_blank" rel="noopener noreferrer"
-          style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', borderBottom: '1px solid var(--text3)44' }}
-        >View transaction →</a>
+    <div style={{ padding: '4px 0', textAlign: 'center' }}>
+      <div style={{ fontSize: '36px', marginBottom: '12px' }}>🎯</div>
+      <div style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: '18px', color: 'var(--teal)', marginBottom: '8px' }}>
+        Bid placed!
       </div>
-
-      {/* Step 2 — sign delivery auth */}
-      <div style={{
-        background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--r)',
-        padding: '20px',
-      }}>
-        <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: '12px' }}>
-          Step 2 — generate your delivery signature
-        </div>
-
-        {sigStep === 'done' ? (
-          <>
-            <p style={{ fontFamily: 'var(--font-body)', fontSize: '14px', color: 'var(--text2)', lineHeight: '1.7', marginBottom: '16px' }}>
-              Add this tag to the <strong style={{ color: 'var(--text)' }}>subject line</strong> of your email to {sellerName}.
-              The gateway will verify your wallet signature and deliver your message.
-            </p>
-
-            <div style={{ marginBottom: '16px' }}>
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', marginBottom: '6px' }}>Subject tag</div>
-              <CopyBox value={subjectTag} />
-            </div>
-
-            <div style={{
-              background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 'var(--r)',
-              padding: '12px 14px', marginBottom: '16px',
-            }}>
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', marginBottom: '6px' }}>Example subject</div>
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text2)' }}>
-                Hey {sellerName.split(' ')[0]}, loved your talk on DeFi {subjectTag}
-              </div>
-            </div>
-
-            <div style={{
-              fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', lineHeight: '1.8',
-              borderTop: '1px solid var(--border)', paddingTop: '12px',
-            }}>
-              ⚠ The tag must appear in the subject line exactly as shown.<br />
-              ⚠ Send from the email address you entered when bidding.<br />
-              ⚠ This signature is single-use and tied to your wallet.
-            </div>
-          </>
-        ) : (
-          <>
-            <p style={{ fontFamily: 'var(--font-body)', fontSize: '14px', color: 'var(--text2)', lineHeight: '1.7', marginBottom: '16px' }}>
-              Sign a message with your wallet to prove you own the winning address.
-              No gas required — this is just a cryptographic signature.
-            </p>
-
-            {/* Gateway email — shown before signing so they know where to send */}
-            <div style={{
-              background: 'var(--bg)', border: '1px solid var(--border2)',
-              borderRadius: 'var(--r)', padding: '14px 16px', marginBottom: '16px',
-            }}>
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', marginBottom: '6px' }}>
-                Send your email to
-              </div>
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '15px', color: 'var(--accent)', fontWeight: 600 }}>
-                {gatewayEmail}
-              </div>
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', marginTop: '4px' }}>
-                Include the subject tag below to prove your win
-              </div>
-            </div>
-            {sigStep === 'error' && (
-              <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--red)', marginBottom: '12px' }}>
-                {errMsg}
-              </div>
-            )}
-            <Btn
-              onClick={sign}
-              disabled={sigStep === 'signing'}
-              style={{ width: '100%', padding: '12px' }}
-            >
-              {sigStep === 'signing' ? 'Check your wallet…' : 'Sign delivery auth →'}
-            </Btn>
-          </>
-        )}
+      <p style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text2)', lineHeight: '1.8', marginBottom: '24px', maxWidth: '360px', margin: '0 auto 24px' }}>
+        You're in the running. When the seller closes this epoch, a receipt will
+        appear in your wallet and on your receipts page — that's when you can
+        generate your delivery token.
+      </p>
+      <a
+        href={`https://suiscan.xyz/testnet/tx/${txDigest}`}
+        target="_blank" rel="noopener noreferrer"
+        style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', borderBottom: '1px solid var(--text3)44', display: 'inline-block', marginBottom: '24px' }}
+      >View transaction →</a>
+      <div>
+        <Btn onClick={() => nav('/receipts')} style={{ width: '100%', padding: '12px' }}>
+          Go to my receipts →
+        </Btn>
       </div>
     </div>
   )
@@ -198,9 +76,8 @@ export default function Profile() {
   const [loading, setLoading]     = useState(true)
   const [bidEmail, setBidEmail]   = useState('')
   const [bidAmount, setBidAmount] = useState('')
-  const [step, setStep]           = useState('idle') // idle | bidding | won | error
+  const [step, setStep]           = useState('idle') // idle | bidding | placed | error
   const [txDigest, setTxDigest]   = useState('')
-  const [paymentId, setPaymentId] = useState('')
   const [errMsg, setErrMsg]       = useState('')
 
   useEffect(() => { load() }, [vaultId])
@@ -216,17 +93,13 @@ export default function Profile() {
     if (!account || !vault || !bidEmail || !bidAmount) return
     setStep('bidding')
     setErrMsg('')
-
     try {
-      // Hash the email — raw address is never sent to the contract
-      const emailHash    = sha256(bidEmail.toLowerCase().trim())
-      const emailHashHex = emailHash  // hex string
-      // payment_id = sha256(emailHashHex + ":" + vaultId)
-      const pid          = sha256(`${emailHashHex}:${vaultId}`)
-      const pidBytes     = Array.from(Buffer.from(pid, 'hex'))
-      const emailHashBytes = Array.from(Buffer.from(emailHashHex, 'hex'))
+      const emailHash      = sha256(bidEmail.toLowerCase().trim())
+      const pid            = sha256(`${emailHash}:${vaultId}`)
+      const pidBytes       = hexToBytes(pid)
+      const emailHashBytes = hexToBytes(emailHash)
 
-      const tx = new Transaction()
+      const tx   = new Transaction()
       const coin = tx.splitCoins(tx.gas, [suiToMist(bidAmount)])
       tx.moveCall({
         target: `${PACKAGE_ID}::attention_market::bid`,
@@ -234,15 +107,14 @@ export default function Profile() {
           tx.object(REGISTRY_ID),
           tx.object(vaultId),
           tx.pure.vector('u8', pidBytes),
-          tx.pure.vector('u8', emailHashBytes),  // hash, not plaintext
+          tx.pure.vector('u8', emailHashBytes),
           coin,
         ],
       })
 
       const res = await signAndExecute({ transaction: tx, options: { showEffects: true } })
       setTxDigest(res.digest)
-      setPaymentId(pid)
-      setStep('won')
+      setStep('placed')
       setTimeout(load, 2000)
     } catch (e) {
       setErrMsg(e.message || 'Transaction failed')
@@ -312,20 +184,25 @@ export default function Profile() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
           {vault.slots.map((slot, i) => <SlotRow key={i} slot={slot} index={i} />)}
         </div>
+        {full && (
+          <div style={{
+            marginTop: '10px', padding: '10px 14px',
+            background: 'color-mix(in srgb, var(--amber) 8%, transparent)',
+            border: '1px solid color-mix(in srgb, var(--amber) 25%, transparent)',
+            borderRadius: 'var(--r)',
+            fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', lineHeight: '1.7',
+          }}>
+            All slots are taken. You can still outbid the lowest holder ({mistToSui(vault.lowestBid)} SUI) — they'll be refunded immediately and you take their slot.
+          </div>
+        )}
       </div>
 
-      {/* Bid / win panel */}
+      {/* Bid panel */}
       <Card style={{ padding: '28px' }}>
-        <SectionLabel>{step === 'won' ? 'Delivery instructions' : 'Place a bid'}</SectionLabel>
+        <SectionLabel>{step === 'placed' ? 'Bid confirmed' : 'Place a bid'}</SectionLabel>
 
-        {step === 'won' ? (
-          <WonPanel
-            vaultId={vaultId}
-            paymentId={paymentId}
-            txDigest={txDigest}
-            sellerName={vault.name}
-            gatewayEmail={vault.gatewayEmail}
-          />
+        {step === 'placed' ? (
+          <BidSuccessPanel txDigest={txDigest} />
         ) : (
           <>
             <p style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text2)', marginBottom: '20px', lineHeight: '1.7' }}>
@@ -333,13 +210,44 @@ export default function Profile() {
               Minimum bid: <strong style={{ color: 'var(--accent)' }}>{minBid} SUI</strong>.
               {full && ' All slots full — outbid the lowest holder to take their slot.'}
             </p>
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <Input label="Your email address" value={bidEmail} onChange={setBidEmail} placeholder="you@example.com" type="email" />
-              <Input label={`Bid amount (min ${minBid} SUI)`} value={bidAmount} onChange={setBidAmount} placeholder={minBid} mono />
+              <div>
+                <Input
+                  label="Your email address"
+                  value={bidEmail}
+                  onChange={setBidEmail}
+                  placeholder="you@example.com"
+                  type="email"
+                />
+                <div style={{
+                  display: 'flex', alignItems: 'flex-start', gap: '7px',
+                  marginTop: '8px', padding: '8px 12px',
+                  background: 'color-mix(in srgb, var(--teal) 8%, transparent)',
+                  border: '1px solid color-mix(in srgb, var(--teal) 25%, transparent)',
+                  borderRadius: 'var(--r)',
+                }}>
+                  <span style={{ fontSize: '13px', flexShrink: 0, marginTop: '1px' }}>🔒</span>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', lineHeight: '1.7' }}>
+                    Hashed with SHA-256 before submission —{' '}
+                    <strong style={{ color: 'var(--teal)' }}>never stored on-chain in plaintext.</strong>
+                  </span>
+                </div>
+              </div>
+
+              <Input
+                label={`Bid amount (min ${minBid} SUI)`}
+                value={bidAmount}
+                onChange={setBidAmount}
+                placeholder={minBid}
+                mono
+              />
             </div>
+
             {step === 'error' && (
               <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--red)', marginTop: '14px', wordBreak: 'break-word' }}>{errMsg}</div>
             )}
+
             <div style={{ marginTop: '20px' }}>
               {!account
                 ? <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text3)' }}>Connect your wallet to bid</div>
@@ -348,8 +256,9 @@ export default function Profile() {
                   </Btn>
               }
             </div>
+
             <p style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text3)', marginTop: '14px', lineHeight: '1.6' }}>
-              Your email address is never stored on-chain. You will be asked to sign a delivery proof after bidding. Bids are non-refundable unless outbid.
+              Receipts are issued when the seller closes the epoch. If outbid, your SUI is refunded immediately.
             </p>
           </>
         )}
