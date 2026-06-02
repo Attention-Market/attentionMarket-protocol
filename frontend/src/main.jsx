@@ -9,11 +9,11 @@ import Market from './pages/Market.jsx'
 import Profile from './pages/Profile.jsx'
 import Register from './pages/Register.jsx'
 import Dashboard from './pages/Dashboard.jsx'
+import Receipts from './pages/Receipts.jsx'
 import Nav from './components/Nav.jsx'
 import './index.css'
 
 const queryClient = new QueryClient()
-
 const { networkConfig } = createNetworkConfig({
   testnet: { url: getJsonRpcFullnodeUrl('testnet') },
 })
@@ -26,10 +26,11 @@ ReactDOM.createRoot(document.getElementById('root')).render(
           <BrowserRouter>
             <Nav />
             <Routes>
-              <Route path="/" element={<Market />} />
+              <Route path="/"              element={<Market />} />
               <Route path="/profile/:vaultId" element={<Profile />} />
-              <Route path="/register" element={<Register />} />
-              <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/register"      element={<Register />} />
+              <Route path="/dashboard"     element={<Dashboard />} />
+              <Route path="/receipts"      element={<Receipts />} />
             </Routes>
           </BrowserRouter>
         </WalletProvider>
