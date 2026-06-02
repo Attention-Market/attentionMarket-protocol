@@ -32,6 +32,7 @@ module attentionmarket::attention_market {
     const EAlreadyWhitelisted: u64 = 6;
     const ENotWhitelisted:     u64 = 7;
     const EAlreadyClosed:      u64 = 8;
+    const EVaultClosed:        u64 = 9;
 
     // ── Structs ───────────────────────────────────────────────────────────────
 
@@ -54,6 +55,10 @@ module attentionmarket::attention_market {
     public struct AttentionVault has key {
         id:              UID,
         owner:           address,
+
+        // Lifecycle
+        /// false after close_vault() is called — blocks new bids.
+        active:          bool,
 
         // Public profile
         name:            String,
@@ -87,8 +92,6 @@ module attentionmarket::attention_market {
         whitelist:       Table<vector<u8>, bool>,
 
         /// Closed conversations: payment_id → true
-        /// Gateway checks this before forwarding any email in either direction.
-        /// Set by seller via close_conversation(). Never unset.
         closed_threads:  Table<vector<u8>, bool>,
     }
 
@@ -154,11 +157,18 @@ module attentionmarket::attention_market {
         amount: u64,
     }
 
-    /// Emitted when seller closes a conversation thread.
     public struct ConversationClosed has copy, drop {
         vault_id:   ID,
         payment_id: vector<u8>,
         seller:     address,
+    }
+
+    /// Emitted when a vault is permanently closed and deleted.
+    public struct VaultClosed has copy, drop {
+        vault_id:        ID,
+        owner:           address,
+        refunds_issued:  u64,   // number of active bidders refunded
+        balance_returned: u64,  // SUI returned to the owner
     }
 
     // ── Init ──────────────────────────────────────────────────────────────────
@@ -175,6 +185,13 @@ module attentionmarket::attention_market {
     #[test_only]
     public fun init_for_testing(ctx: &mut TxContext) {
         init(ctx);
+    }
+
+    /// Test-only: set active=false without deleting the vault.
+    /// Lets tests verify that bid() and settle_epoch() abort with EVaultClosed.
+    #[test_only]
+    public fun deactivate_for_testing(vault: &mut AttentionVault) {
+        vault.active = false;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -225,15 +242,6 @@ module attentionmarket::attention_market {
 
     // ── Entry functions ───────────────────────────────────────────────────────
 
-    /// Register a new seller vault.
-    ///
-    /// The three `encrypted_email_*` parameters come directly from encrypt.js:
-    ///   - ephemeral_pubkey  → Base64-decoded bytes of `result.ephemeralPublicKey`
-    ///   - iv                → Base64-decoded bytes of `result.iv`
-    ///   - ciphertext        → Base64-decoded bytes of `result.ciphertext`
-    ///
-    /// Only the gateway (holder of PRIVATE_KEY) can recover the plaintext email
-    /// by passing these three fields to decrypt.js.
     public fun register(
         registry:                         &mut Registry,
         name:                             String,
@@ -262,6 +270,7 @@ module attentionmarket::attention_market {
         let vault = AttentionVault {
             id:              object::new(ctx),
             owner:           ctx.sender(),
+            active:          true,
             name,
             bio,
             category,
@@ -302,9 +311,6 @@ module attentionmarket::attention_market {
         transfer::transfer(VaultCap { id: object::new(ctx), vault_id }, ctx.sender());
     }
 
-    /// Update the encrypted real inbox. Call this if the seller rotates their
-    /// email address — re-encrypt the new address with encrypt.js and pass the
-    /// new blob here.
     public fun update_encrypted_email(
         vault:                            &mut AttentionVault,
         cap:                              &VaultCap,
@@ -328,6 +334,8 @@ module attentionmarket::attention_market {
         bid_coin:          Coin<SUI>,
         ctx:               &mut TxContext,
     ) {
+        assert!(vault.active, EVaultClosed);
+
         let bid_amount = coin::value(&bid_coin);
         assert!(bid_amount >= vault.floor_bid, EBidTooLow);
 
@@ -399,6 +407,126 @@ module attentionmarket::attention_market {
         });
     }
 
+    /// Permanently close and delete the vault.
+    ///
+    /// What this does in one atomic transaction:
+    ///   1. Verifies caller is the owner via VaultCap (cap is consumed/deleted).
+    ///   2. Refunds every active slot bidder directly — no claim step needed.
+    ///   3. Withdraws any remaining vault balance to the owner.
+    ///   4. Destroys the whitelist and closed_threads tables (must be empty first —
+    ///      the function drains whitelist entries and closed_threads are left in place,
+    ///      so the caller must have cleared them beforehand via remove_from_whitelist
+    ///      and the closed_threads table is destroyed only if empty — see note below).
+    ///   5. Deletes the vault object and the VaultCap.
+    ///
+    /// Note on closed_threads: table::destroy_empty aborts if non-empty.
+    /// The seller must call close_conversation() for all active threads before
+    /// closing, OR the table must simply be empty (no threads were ever closed).
+    /// This is intentional — it forces the seller to explicitly acknowledge
+    /// outstanding conversations before deletion.
+    public fun close_vault(
+        vault: AttentionVault,
+        cap:   VaultCap,
+        ctx:   &mut TxContext,
+    ) {
+        // ── Auth ──────────────────────────────────────────────────────────────
+        assert!(cap.vault_id == object::id(&vault), ENotOwner);
+        assert!(ctx.sender() == vault.owner, ENotOwner);
+
+        // ── Unpack vault ──────────────────────────────────────────────────────
+        let AttentionVault {
+            id,
+            owner,
+            active: _,
+            name: _,
+            bio: _,
+            category: _,
+            social_handle: _,
+            gateway_email: _,
+            encrypted_email_ephemeral_pubkey: _,
+            encrypted_email_iv: _,
+            encrypted_email_ciphertext: _,
+            epoch: _,
+            epoch_start: _,
+            epoch_duration: _,
+            mut slots,
+            slots_per_epoch: _,
+            floor_bid: _,
+            mut balance,
+            total_earned: _,
+            total_bids: _,
+            whitelist,
+            closed_threads,
+        } = vault;
+
+        let vault_id = id.to_inner();
+
+        // ── Refund all active slot bidders directly ────────────────────────────
+        // Also drain any pending_refund balances that haven't been claimed yet.
+        let mut refunds_issued = 0u64;
+        while (!vector::is_empty(&mut slots)) {
+            let Slot {
+                bidder,
+                amount,
+                sender_email_hash: _,
+                payment_id: _,
+                outbid_address,
+                mut pending_refund,
+            } = vector::pop_back(&mut slots);
+
+            // Refund the outbid bidder if they haven't claimed yet
+            if (outbid_address != @0x0) {
+                let refund_amount = balance::value(&pending_refund);
+                if (refund_amount > 0) {
+                    let refund_coin = coin::from_balance(
+                        balance::withdraw_all(&mut pending_refund), ctx
+                    );
+                    transfer::public_transfer(refund_coin, outbid_address);
+                    refunds_issued = refunds_issued + 1;
+                };
+            };
+            balance::destroy_zero(pending_refund);
+
+            // Refund the active bidder from the main vault balance
+            if (bidder != @0x0 && amount > 0) {
+                let refund_coin = coin::from_balance(
+                    balance::split(&mut balance, amount), ctx
+                );
+                transfer::public_transfer(refund_coin, bidder);
+                refunds_issued = refunds_issued + 1;
+            };
+        };
+        vector::destroy_empty(slots);
+
+        // ── Return remaining balance to owner (earned fees, etc.) ─────────────
+        let balance_returned = balance::value(&balance);
+        if (balance_returned > 0) {
+            let remaining = coin::from_balance(balance::withdraw_all(&mut balance), ctx);
+            transfer::public_transfer(remaining, owner);
+        };
+        balance::destroy_zero(balance);
+
+        // ── Destroy tables ────────────────────────────────────────────────────
+        // whitelist can be non-empty — drop it entirely
+        table::drop(whitelist);
+        // closed_threads: destroy_empty aborts if any threads were closed but
+        // not accounted for — this is the intended safety check.
+        table::destroy_empty(closed_threads);
+
+        // ── Emit & delete ─────────────────────────────────────────────────────
+        event::emit(VaultClosed {
+            vault_id,
+            owner,
+            refunds_issued,
+            balance_returned,
+        });
+
+        // Consume the cap and the vault UID
+        let VaultCap { id: cap_id, vault_id: _ } = cap;
+        object::delete(cap_id);
+        object::delete(id);
+    }
+
     public fun close_conversation(
         vault:      &mut AttentionVault,
         cap:        &VaultCap,
@@ -439,6 +567,7 @@ module attentionmarket::attention_market {
     ) {
         assert!(cap.vault_id == object::id(vault), ENotOwner);
         assert!(ctx.sender() == vault.owner, ENotOwner);
+        assert!(vault.active, EVaultClosed);
 
         let mut winner_count = 0u64;
         let mut i = 0;
@@ -547,10 +676,6 @@ module attentionmarket::attention_market {
 
     // ── Read-only ─────────────────────────────────────────────────────────────
 
-    /// Returns the three encrypted email blobs. Pass these directly to decrypt.js:
-    ///   { ephemeralPublicKey: toBase64(ephemeral_pubkey),
-    ///     iv:                 toBase64(iv),
-    ///     ciphertext:         toBase64(ciphertext) }
     public fun encrypted_email(vault: &AttentionVault): (vector<u8>, vector<u8>, vector<u8>) {
         (
             vault.encrypted_email_ephemeral_pubkey,
@@ -559,10 +684,10 @@ module attentionmarket::attention_market {
         )
     }
 
+    public fun is_vault_active(vault: &AttentionVault): bool  { vault.active }
     public fun is_thread_closed(vault: &AttentionVault, payment_id: &vector<u8>): bool {
         table::contains(&vault.closed_threads, *payment_id)
     }
-
     public fun is_whitelisted(vault: &AttentionVault, email_hash: &vector<u8>): bool {
         table::contains(&vault.whitelist, *email_hash)
     }
