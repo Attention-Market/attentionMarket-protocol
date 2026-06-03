@@ -31,9 +31,16 @@ export function suiToMist(sui) {
 }
 
 /**
+ * Compute the net seller payout after platform fee.
+ * Returns { fee, net } both in MIST.
+ */
+export function applyFee(amountMist, feeBps) {
+  const fee = Math.floor(Number(amountMist) * feeBps / 10_000)
+  return { fee, net: Number(amountMist) - fee }
+}
+
+/**
  * Fetch current Sui epoch info for countdown calculations.
- * Uses client.core.getCurrentSystemState() which returns systemState
- * with epoch, epochStartTimestampMs, and epochDurationMs.
  */
 export async function fetchEpochInfo() {
   const res = await client.core.getCurrentSystemState()
@@ -45,21 +52,23 @@ export async function fetchEpochInfo() {
   }
 }
 
-/** Fetch the Registry object to get all vault IDs */
+/** Fetch the Registry object to get all vault IDs and platform fee config */
 export async function fetchRegistry() {
   if (!REGISTRY_ID) {
-    return { vault_ids: [], total_sellers: 0, total_bids: 0 }
+    return { vault_ids: [], total_sellers: 0, total_bids: 0, fee_bps: 0, fee_recipient: '' }
   }
   const { object } = await client.core.getObject({
     objectId: REGISTRY_ID,
     include: { json: true },
   })
   const f = object?.json
-  if (!f) return { vault_ids: [], total_sellers: 0, total_bids: 0 }
+  if (!f) return { vault_ids: [], total_sellers: 0, total_bids: 0, fee_bps: 0, fee_recipient: '' }
   return {
     vault_ids:     f.vault_ids || [],
     total_sellers: Number(f.total_sellers),
     total_bids:    Number(f.total_bids),
+    fee_bps:       Number(f.fee_bps ?? 0),
+    fee_recipient: f.fee_recipient ?? '',
   }
 }
 
