@@ -5,14 +5,21 @@
 ///   - Bidders compete for slots. If slots are full, a higher bid displaces
 ///     the lowest current holder, who is refunded immediately on-chain.
 ///   - Seller manually settles the epoch: AttentionReceipt is minted to every
-///     winner, slots reset, epoch increments, and collected funds are
-///     transferred directly to the vault owner.
+///     winner, slots reset, epoch increments, and collected funds (minus
+///     platform fee) are transferred directly to the vault owner.
 ///   - Winners use their AttentionReceipt to sign a delivery token on the
 ///     frontend at any time.
 ///   - Seller can close a specific conversation via close_conversation(), which
 ///     invalidates that payment_id at the gateway permanently.
 ///   - Bids that remain unsettled for 10+ epochs beyond their auction epoch
 ///     can be refunded by anyone calling refund_expired_bids().
+///
+/// Fee model:
+///   - A platform fee (basis points, max 1000 = 10%) is set on the Registry
+///     by the holder of the PlatformCap (the deployer).
+///   - Fee is deducted from proceeds at settle_epoch() and withdraw() and
+///     sent to the fee_recipient address stored on the Registry.
+///   - fee_bps = 0 means no fee is taken.
 ///
 /// Privacy model:
 ///   - Seller's real inbox stored as ECDH/AES-GCM encrypted blob only.
@@ -29,9 +36,11 @@ module attentionmarket::attention_market {
     use std::string::String;
 
     // ── Constants ─────────────────────────────────────────────────────────────
-    const GLOBAL_FLOOR:      u64 = 1_000_000;  // 0.001 SUI
-    const MAX_SLOTS:         u64 = 100;
+    const GLOBAL_FLOOR:        u64 = 1_000_000;  // 0.001 SUI
+    const MAX_SLOTS:           u64 = 100;
     const REFUND_AFTER_EPOCHS: u64 = 10;
+    const MAX_FEE_BPS:         u64 = 1_000;      // 10%
+    const BPS_DENOM:           u64 = 10_000;
 
     // ── Errors ────────────────────────────────────────────────────────────────
     const ENotOwner:              u64 = 1;
@@ -46,8 +55,16 @@ module attentionmarket::attention_market {
     const EEpochExpired:          u64 = 11;
     /// Settle rejected — the epoch bidding window is still open.
     const EEpochNotOver:          u64 = 12;
+    /// Proposed fee exceeds the 10% platform cap.
+    const EFeeTooHigh:            u64 = 13;
 
     // ── Structs ───────────────────────────────────────────────────────────────
+
+    /// Capability held by the deployer. Required to update fee_bps or
+    /// fee_recipient on the Registry.
+    public struct PlatformCap has key, store {
+        id: UID,
+    }
 
     public struct Registry has key {
         id:             UID,
@@ -55,6 +72,10 @@ module attentionmarket::attention_market {
         total_sellers:  u64,
         total_bids:     u64,
         gateway_emails: Table<String, ID>,
+        /// Platform fee in basis points (0–1000). Set by PlatformCap holder.
+        fee_bps:        u64,
+        /// Address that receives platform fees.
+        fee_recipient:  address,
     }
 
     /// One auction slot. Overbid refunds are immediate — no pending state.
@@ -173,12 +194,22 @@ module attentionmarket::attention_market {
         vault_id:        ID,
         auction_epoch:   u64,
         total_collected: u64,
+        fee_taken:       u64,
+        seller_received: u64,
         winner_count:    u64,
     }
 
     public struct FundsWithdrawn has copy, drop {
-        seller: address,
-        amount: u64,
+        seller:          address,
+        amount:          u64,
+        fee_taken:       u64,
+        seller_received: u64,
+    }
+
+    public struct FeeUpdated has copy, drop {
+        old_fee_bps:    u64,
+        new_fee_bps:    u64,
+        fee_recipient:  address,
     }
 
     public struct ConversationClosed has copy, drop {
@@ -197,12 +228,17 @@ module attentionmarket::attention_market {
     // ── Init ──────────────────────────────────────────────────────────────────
 
     fun init(ctx: &mut TxContext) {
+        // PlatformCap goes to the deployer — they alone control fee settings.
+        transfer::transfer(PlatformCap { id: object::new(ctx) }, ctx.sender());
+
         transfer::share_object(Registry {
             id:             object::new(ctx),
             vault_ids:      vector::empty(),
             total_sellers:  0,
             total_bids:     0,
             gateway_emails: table::new(ctx),
+            fee_bps:        0,          // no fee by default
+            fee_recipient:  ctx.sender(),
         });
     }
 
@@ -257,8 +293,32 @@ module attentionmarket::attention_market {
         abort 0
     }
 
+    /// Split `amount` into (fee, remainder) using the registry's fee_bps.
+    /// fee = amount * fee_bps / 10_000, rounded down.
+    fun compute_fee(amount: u64, fee_bps: u64): (u64, u64) {
+        let fee = amount * fee_bps / BPS_DENOM;
+        (fee, amount - fee)
+    }
+
+    /// Deduct fee from vault balance, send fee to recipient, return net amount.
+    fun deduct_and_send_fee(
+        vault:         &mut AttentionVault,
+        total:         u64,
+        fee_bps:       u64,
+        fee_recipient: address,
+        ctx:           &mut TxContext,
+    ): (u64, u64) {
+        let (fee, net) = compute_fee(total, fee_bps);
+        if (fee > 0) {
+            let fee_coin = coin::from_balance(
+                balance::split(&mut vault.balance, fee), ctx
+            );
+            transfer::public_transfer(fee_coin, fee_recipient);
+        };
+        (fee, net)
+    }
+
     /// Refund and clear any slot whose bid is at least REFUND_AFTER_EPOCHS old.
-    /// Returns the number of slots freed.
     fun sweep_expired_slots(
         vault:         &mut AttentionVault,
         current_epoch: u64,
@@ -273,9 +333,9 @@ module attentionmarket::attention_market {
                 && slot.amount > 0
                 && current_epoch >= slot.bid_epoch + REFUND_AFTER_EPOCHS)
             {
-                let bidder       = slot.bidder;
+                let bidder        = slot.bidder;
                 let refund_amount = slot.amount;
-                let bid_epoch    = slot.bid_epoch;
+                let bid_epoch     = slot.bid_epoch;
 
                 let refund = coin::from_balance(
                     balance::split(&mut vault.balance, refund_amount), ctx
@@ -290,7 +350,6 @@ module attentionmarket::attention_market {
                     bid_epoch,
                 });
 
-                // Reset to empty slot in-place
                 let s = vector::borrow_mut(&mut vault.slots, i);
                 s.bidder            = @0x0;
                 s.amount            = 0;
@@ -306,6 +365,21 @@ module attentionmarket::attention_market {
     }
 
     // ── Entry functions ───────────────────────────────────────────────────────
+
+    /// Update the platform fee. Only the PlatformCap holder can call this.
+    /// fee_bps must be ≤ 1000 (10%). Set fee_recipient to wherever fees go.
+    public fun set_fee(
+        registry:      &mut Registry,
+        _cap:          &PlatformCap,
+        fee_bps:       u64,
+        fee_recipient: address,
+    ) {
+        assert!(fee_bps <= MAX_FEE_BPS, EFeeTooHigh);
+        let old = registry.fee_bps;
+        registry.fee_bps       = fee_bps;
+        registry.fee_recipient = fee_recipient;
+        event::emit(FeeUpdated { old_fee_bps: old, new_fee_bps: fee_bps, fee_recipient });
+    }
 
     public fun register(
         registry:                         &mut Registry,
@@ -391,22 +465,20 @@ module attentionmarket::attention_market {
         ctx:               &mut TxContext,
     ) {
         assert!(vault.active, EVaultClosed);
-        // Reject bids once the epoch bidding window has closed
         assert!(ctx.epoch() < vault.epoch_start + vault.epoch_duration, EEpochExpired);
 
         // Sweep any stale bids before deciding slot availability
         sweep_expired_slots(vault, ctx.epoch(), ctx);
 
-        let bid_amount = coin::value(&bid_coin);
+        let bid_amount    = coin::value(&bid_coin);
         assert!(bid_amount >= vault.floor_bid, EBidTooLow);
 
-        let vault_id     = object::id(vault);
-        let sender       = ctx.sender();
+        let vault_id      = object::id(vault);
+        let sender        = ctx.sender();
         let current_epoch = vault.epoch;
         let slot_index: u64;
 
         if (has_empty_slot(&vault.slots)) {
-            // ── Fill an empty slot ────────────────────────────────────────────
             slot_index = first_empty_slot(&vault.slots);
             let slot = vector::borrow_mut(&mut vault.slots, slot_index);
             balance::join(&mut vault.balance, coin::into_balance(bid_coin));
@@ -416,7 +488,6 @@ module attentionmarket::attention_market {
             slot.payment_id        = payment_id;
             slot.bid_epoch         = current_epoch;
         } else {
-            // ── Outbid the lowest slot holder ─────────────────────────────────
             slot_index = lowest_slot_index(&vault.slots);
             let slot = vector::borrow_mut(&mut vault.slots, slot_index);
             assert!(bid_amount > slot.amount, EBidTooLow);
@@ -424,7 +495,6 @@ module attentionmarket::attention_market {
             let outbid_address = slot.bidder;
             let outbid_amount  = slot.amount;
 
-            // Refund the displaced bidder immediately — no pending state
             let refund = coin::from_balance(
                 balance::split(&mut vault.balance, outbid_amount), ctx
             );
@@ -437,7 +507,6 @@ module attentionmarket::attention_market {
                 slot_index,
             });
 
-            // Place the new bid
             balance::join(&mut vault.balance, coin::into_balance(bid_coin));
             slot.bidder            = sender;
             slot.amount            = bid_amount;
@@ -470,17 +539,17 @@ module attentionmarket::attention_market {
 
     /// Settle the current epoch.
     /// Mints a soulbound AttentionReceipt to every winning slot holder,
-    /// resets all slots, increments epoch, and transfers all collected
-    /// funds directly to the vault owner.
+    /// resets all slots, increments epoch. Platform fee is deducted first;
+    /// the net amount is transferred directly to the vault owner.
     public fun settle_epoch(
-        vault: &mut AttentionVault,
-        cap:   &VaultCap,
-        ctx:   &mut TxContext,
+        registry: &Registry,
+        vault:    &mut AttentionVault,
+        cap:      &VaultCap,
+        ctx:      &mut TxContext,
     ) {
         assert!(cap.vault_id == object::id(vault), ENotOwner);
         assert!(ctx.sender() == vault.owner, ENotOwner);
         assert!(vault.active, EVaultClosed);
-        // Only settleable after the epoch bidding window has expired
         assert!(ctx.epoch() >= vault.epoch_start + vault.epoch_duration, EEpochNotOver);
 
         let vault_id        = object::id(vault);
@@ -528,7 +597,7 @@ module attentionmarket::attention_market {
             i = i + 1;
         };
 
-        // Clear slots — all overbid refunds were already immediate
+        // Clear and refill slots for next epoch
         while (!vector::is_empty(&vault.slots)) {
             let Slot {
                 bidder: _,
@@ -538,8 +607,6 @@ module attentionmarket::attention_market {
                 bid_epoch: _,
             } = vector::pop_back(&mut vault.slots);
         };
-
-        // Refill for next epoch
         let mut j = 0;
         while (j < vault.slots_per_epoch) {
             vector::push_back(&mut vault.slots, empty_slot());
@@ -550,36 +617,67 @@ module attentionmarket::attention_market {
         vault.epoch        = vault.epoch + 1;
         vault.epoch_start  = ctx.epoch();
 
+        // Deduct platform fee, then pay seller the remainder
+        let (fee_taken, seller_received) = deduct_and_send_fee(
+            vault,
+            total_collected,
+            registry.fee_bps,
+            registry.fee_recipient,
+            ctx,
+        );
+
         event::emit(EpochSettled {
             vault_id,
             auction_epoch: current_epoch,
             total_collected,
+            fee_taken,
+            seller_received,
             winner_count,
         });
 
-        // Transfer all collected funds directly to the vault owner
-        if (total_collected > 0) {
+        if (seller_received > 0) {
             let payout = coin::from_balance(
                 balance::withdraw_all(&mut vault.balance), ctx
             );
             transfer::public_transfer(payout, seller);
-            event::emit(FundsWithdrawn { seller, amount: total_collected });
+            event::emit(FundsWithdrawn {
+                seller,
+                amount:          total_collected,
+                fee_taken,
+                seller_received,
+            });
         };
     }
 
-    /// Withdraw any residual balance (e.g. after expired-bid sweeps between epochs).
+    /// Withdraw any residual balance (e.g. after expired-bid sweeps).
+    /// Platform fee is deducted before paying the seller.
     public fun withdraw(
-        vault: &mut AttentionVault,
-        cap:   &VaultCap,
-        ctx:   &mut TxContext,
+        registry: &Registry,
+        vault:    &mut AttentionVault,
+        cap:      &VaultCap,
+        ctx:      &mut TxContext,
     ) {
         assert!(cap.vault_id == object::id(vault), ENotOwner);
         assert!(ctx.sender() == vault.owner, ENotOwner);
         let amount = balance::value(&vault.balance);
         assert!(amount > 0, EZeroBalance);
+
+        let (fee_taken, seller_received) = deduct_and_send_fee(
+            vault,
+            amount,
+            registry.fee_bps,
+            registry.fee_recipient,
+            ctx,
+        );
+
         let coin = coin::from_balance(balance::withdraw_all(&mut vault.balance), ctx);
         transfer::public_transfer(coin, vault.owner);
-        event::emit(FundsWithdrawn { seller: vault.owner, amount });
+        event::emit(FundsWithdrawn {
+            seller:          vault.owner,
+            amount,
+            fee_taken,
+            seller_received,
+        });
     }
 
     /// Permanently invalidate a winner's delivery token.
@@ -601,7 +699,7 @@ module attentionmarket::attention_market {
     }
 
     /// Permanently close and delete the vault.
-    /// Any unsettled slot bidders in the current epoch are refunded immediately.
+    /// Any unsettled slot bidders are refunded. No fee on refunds.
     /// closed_threads table must be empty — settle all epochs first.
     public fun close_vault(
         registry: &mut Registry,
@@ -639,7 +737,7 @@ module attentionmarket::attention_market {
         let vault_id = id.to_inner();
         let mut refunds_issued = 0u64;
 
-        // Refund any active bidders in the unsettled current epoch
+        // Refund active bidders — no fee on refunds
         while (!vector::is_empty(&mut slots)) {
             let Slot {
                 bidder,
@@ -760,17 +858,19 @@ module attentionmarket::attention_market {
         if (has_empty_slot(&vault.slots)) return vault.floor_bid;
         vector::borrow(&vault.slots, lowest_slot_index(&vault.slots)).amount
     }
-    public fun floor_bid(vault: &AttentionVault): u64       { vault.floor_bid }
-    public fun current_epoch(vault: &AttentionVault): u64   { vault.epoch }
-    public fun total_earned(vault: &AttentionVault): u64    { vault.total_earned }
-    public fun total_bids(vault: &AttentionVault): u64      { vault.total_bids }
-    public fun vault_balance(vault: &AttentionVault): u64   { balance::value(&vault.balance) }
-    public fun vault_owner(vault: &AttentionVault): address { vault.owner }
+    public fun floor_bid(vault: &AttentionVault): u64        { vault.floor_bid }
+    public fun current_epoch(vault: &AttentionVault): u64    { vault.epoch }
+    public fun total_earned(vault: &AttentionVault): u64     { vault.total_earned }
+    public fun total_bids(vault: &AttentionVault): u64       { vault.total_bids }
+    public fun vault_balance(vault: &AttentionVault): u64    { balance::value(&vault.balance) }
+    public fun vault_owner(vault: &AttentionVault): address  { vault.owner }
     public fun gateway_email(vault: &AttentionVault): &String { &vault.gateway_email }
-    public fun registry_count(r: &Registry): u64          { r.total_sellers }
-    public fun registry_total_bids(r: &Registry): u64     { r.total_bids }
-    public fun registry_vaults(r: &Registry): &vector<ID> { &r.vault_ids }
+    public fun registry_count(r: &Registry): u64             { r.total_sellers }
+    public fun registry_total_bids(r: &Registry): u64        { r.total_bids }
+    public fun registry_vaults(r: &Registry): &vector<ID>    { &r.vault_ids }
     public fun registry_email_taken(r: &Registry, email: String): bool {
         table::contains(&r.gateway_emails, email)
     }
+    public fun registry_fee_bps(r: &Registry): u64           { r.fee_bps }
+    public fun registry_fee_recipient(r: &Registry): address  { r.fee_recipient }
 }
