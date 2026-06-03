@@ -5,11 +5,14 @@
 ///   - Bidders compete for slots. If slots are full, a higher bid displaces
 ///     the lowest current holder, who is refunded immediately on-chain.
 ///   - Seller manually settles the epoch: AttentionReceipt is minted to every
-///     winner, slots reset, epoch increments.
+///     winner, slots reset, epoch increments, and collected funds are
+///     transferred directly to the vault owner.
 ///   - Winners use their AttentionReceipt to sign a delivery token on the
 ///     frontend at any time.
 ///   - Seller can close a specific conversation via close_conversation(), which
 ///     invalidates that payment_id at the gateway permanently.
+///   - Bids that remain unsettled for 10+ epochs beyond their auction epoch
+///     can be refunded by anyone calling refund_expired_bids().
 ///
 /// Privacy model:
 ///   - Seller's real inbox stored as ECDH/AES-GCM encrypted blob only.
@@ -26,8 +29,9 @@ module attentionmarket::attention_market {
     use std::string::String;
 
     // ── Constants ─────────────────────────────────────────────────────────────
-    const GLOBAL_FLOOR: u64 = 1_000_000;  // 0.001 SUI
-    const MAX_SLOTS:    u64 = 100;
+    const GLOBAL_FLOOR:      u64 = 1_000_000;  // 0.001 SUI
+    const MAX_SLOTS:         u64 = 100;
+    const REFUND_AFTER_EPOCHS: u64 = 10;
 
     // ── Errors ────────────────────────────────────────────────────────────────
     const ENotOwner:              u64 = 1;
@@ -35,8 +39,6 @@ module attentionmarket::attention_market {
     const EBelowGlobalFloor:      u64 = 3;
     const EZeroBalance:           u64 = 4;
     const ETooManySlots:          u64 = 5;
-    const EAlreadyWhitelisted:    u64 = 6;
-    const ENotWhitelisted:        u64 = 7;
     const EAlreadyClosed:         u64 = 8;
     const EVaultClosed:           u64 = 9;
     const EDuplicateGatewayEmail: u64 = 10;
@@ -61,6 +63,8 @@ module attentionmarket::attention_market {
         amount:            u64,
         sender_email_hash: vector<u8>,
         payment_id:        vector<u8>,
+        /// The vault epoch in which this bid was placed (for expiry checks).
+        bid_epoch:         u64,
     }
 
     public struct AttentionVault has key {
@@ -93,7 +97,6 @@ module attentionmarket::attention_market {
         total_earned:    u64,
         total_bids:      u64,
 
-        whitelist:      Table<vector<u8>, bool>,
         closed_threads: Table<vector<u8>, bool>,
     }
 
@@ -144,6 +147,14 @@ module attentionmarket::attention_market {
         outbid_address: address,
         refund_amount:  u64,
         slot_index:     u64,
+    }
+
+    public struct BidExpiredRefund has copy, drop {
+        vault_id:      ID,
+        bidder:        address,
+        refund_amount: u64,
+        slot_index:    u64,
+        bid_epoch:     u64,
     }
 
     public struct SlotWon has copy, drop {
@@ -209,6 +220,7 @@ module attentionmarket::attention_market {
             amount:            0,
             sender_email_hash: vector::empty(),
             payment_id:        vector::empty(),
+            bid_epoch:         0,
         }
     }
 
@@ -243,6 +255,54 @@ module attentionmarket::attention_market {
             i = i + 1;
         };
         abort 0
+    }
+
+    /// Refund and clear any slot whose bid is at least REFUND_AFTER_EPOCHS old.
+    /// Returns the number of slots freed.
+    fun sweep_expired_slots(
+        vault:         &mut AttentionVault,
+        current_epoch: u64,
+        ctx:           &mut TxContext,
+    ): u64 {
+        let vault_id = object::id(vault);
+        let mut freed = 0u64;
+        let mut i = 0;
+        while (i < vector::length(&vault.slots)) {
+            let slot = vector::borrow(&vault.slots, i);
+            if (slot.bidder != @0x0
+                && slot.amount > 0
+                && current_epoch >= slot.bid_epoch + REFUND_AFTER_EPOCHS)
+            {
+                let bidder       = slot.bidder;
+                let refund_amount = slot.amount;
+                let bid_epoch    = slot.bid_epoch;
+
+                let refund = coin::from_balance(
+                    balance::split(&mut vault.balance, refund_amount), ctx
+                );
+                transfer::public_transfer(refund, bidder);
+
+                event::emit(BidExpiredRefund {
+                    vault_id,
+                    bidder,
+                    refund_amount,
+                    slot_index: i,
+                    bid_epoch,
+                });
+
+                // Reset to empty slot in-place
+                let s = vector::borrow_mut(&mut vault.slots, i);
+                s.bidder            = @0x0;
+                s.amount            = 0;
+                s.sender_email_hash = vector::empty();
+                s.payment_id        = vector::empty();
+                s.bid_epoch         = 0;
+
+                freed = freed + 1;
+            };
+            i = i + 1;
+        };
+        freed
     }
 
     // ── Entry functions ───────────────────────────────────────────────────────
@@ -294,7 +354,6 @@ module attentionmarket::attention_market {
             balance:         balance::zero<SUI>(),
             total_earned:    0,
             total_bids:      0,
-            whitelist:       table::new(ctx),
             closed_threads:  table::new(ctx),
         };
 
@@ -319,6 +378,7 @@ module attentionmarket::attention_market {
     }
 
     /// Place or improve a bid.
+    /// - Expired slots (bid placed 10+ epochs ago) are swept and refunded first.
     /// - Empty slot available: fill it immediately.
     /// - All slots full: must beat the lowest bid. The displaced bidder is
     ///   refunded immediately via transfer — no claim step needed.
@@ -334,11 +394,15 @@ module attentionmarket::attention_market {
         // Reject bids once the epoch bidding window has closed
         assert!(ctx.epoch() < vault.epoch_start + vault.epoch_duration, EEpochExpired);
 
+        // Sweep any stale bids before deciding slot availability
+        sweep_expired_slots(vault, ctx.epoch(), ctx);
+
         let bid_amount = coin::value(&bid_coin);
         assert!(bid_amount >= vault.floor_bid, EBidTooLow);
 
-        let vault_id = object::id(vault);
-        let sender   = ctx.sender();
+        let vault_id     = object::id(vault);
+        let sender       = ctx.sender();
+        let current_epoch = vault.epoch;
         let slot_index: u64;
 
         if (has_empty_slot(&vault.slots)) {
@@ -350,6 +414,7 @@ module attentionmarket::attention_market {
             slot.amount            = bid_amount;
             slot.sender_email_hash = sender_email_hash;
             slot.payment_id        = payment_id;
+            slot.bid_epoch         = current_epoch;
         } else {
             // ── Outbid the lowest slot holder ─────────────────────────────────
             slot_index = lowest_slot_index(&vault.slots);
@@ -378,6 +443,7 @@ module attentionmarket::attention_market {
             slot.amount            = bid_amount;
             slot.sender_email_hash = sender_email_hash;
             slot.payment_id        = payment_id;
+            slot.bid_epoch         = current_epoch;
         };
 
         vault.total_bids    = vault.total_bids + 1;
@@ -390,13 +456,22 @@ module attentionmarket::attention_market {
             bidder:        sender,
             amount:        bid_amount,
             slot_index,
-            auction_epoch: vault.epoch,
+            auction_epoch: current_epoch,
         });
+    }
+
+    /// Manually trigger expired-bid refunds on a vault (callable by anyone).
+    public fun refund_expired_bids(
+        vault: &mut AttentionVault,
+        ctx:   &mut TxContext,
+    ) {
+        sweep_expired_slots(vault, ctx.epoch(), ctx);
     }
 
     /// Settle the current epoch.
     /// Mints a soulbound AttentionReceipt to every winning slot holder,
-    /// resets all slots, increments epoch.
+    /// resets all slots, increments epoch, and transfers all collected
+    /// funds directly to the vault owner.
     public fun settle_epoch(
         vault: &mut AttentionVault,
         cap:   &VaultCap,
@@ -453,10 +528,15 @@ module attentionmarket::attention_market {
             i = i + 1;
         };
 
-        // Clear slots — no pending_refund to handle, all refunds were immediate
+        // Clear slots — all overbid refunds were already immediate
         while (!vector::is_empty(&vault.slots)) {
-            let Slot { bidder: _, amount: _, sender_email_hash: _, payment_id: _ } =
-                vector::pop_back(&mut vault.slots);
+            let Slot {
+                bidder: _,
+                amount: _,
+                sender_email_hash: _,
+                payment_id: _,
+                bid_epoch: _,
+            } = vector::pop_back(&mut vault.slots);
         };
 
         // Refill for next epoch
@@ -476,8 +556,18 @@ module attentionmarket::attention_market {
             total_collected,
             winner_count,
         });
+
+        // Transfer all collected funds directly to the vault owner
+        if (total_collected > 0) {
+            let payout = coin::from_balance(
+                balance::withdraw_all(&mut vault.balance), ctx
+            );
+            transfer::public_transfer(payout, seller);
+            event::emit(FundsWithdrawn { seller, amount: total_collected });
+        };
     }
 
+    /// Withdraw any residual balance (e.g. after expired-bid sweeps between epochs).
     public fun withdraw(
         vault: &mut AttentionVault,
         cap:   &VaultCap,
@@ -543,7 +633,6 @@ module attentionmarket::attention_market {
             mut balance,
             total_earned: _,
             total_bids: _,
-            whitelist,
             closed_threads,
         } = vault;
 
@@ -552,8 +641,13 @@ module attentionmarket::attention_market {
 
         // Refund any active bidders in the unsettled current epoch
         while (!vector::is_empty(&mut slots)) {
-            let Slot { bidder, amount, sender_email_hash: _, payment_id: _ } =
-                vector::pop_back(&mut slots);
+            let Slot {
+                bidder,
+                amount,
+                sender_email_hash: _,
+                payment_id: _,
+                bid_epoch: _,
+            } = vector::pop_back(&mut slots);
             if (bidder != @0x0 && amount > 0) {
                 let refund = coin::from_balance(balance::split(&mut balance, amount), ctx);
                 transfer::public_transfer(refund, bidder);
@@ -569,7 +663,6 @@ module attentionmarket::attention_market {
         };
         balance::destroy_zero(balance);
 
-        table::drop(whitelist);
         table::destroy_empty(closed_threads);
 
         if (table::contains(&registry.gateway_emails, gateway_email)) {
@@ -601,30 +694,6 @@ module attentionmarket::attention_market {
         vault.encrypted_email_ephemeral_pubkey = encrypted_email_ephemeral_pubkey;
         vault.encrypted_email_iv               = encrypted_email_iv;
         vault.encrypted_email_ciphertext       = encrypted_email_ciphertext;
-    }
-
-    public fun add_to_whitelist(
-        vault:             &mut AttentionVault,
-        cap:               &VaultCap,
-        sender_email_hash: vector<u8>,
-        ctx:               &mut TxContext,
-    ) {
-        assert!(cap.vault_id == object::id(vault), ENotOwner);
-        assert!(ctx.sender() == vault.owner, ENotOwner);
-        assert!(!table::contains(&vault.whitelist, sender_email_hash), EAlreadyWhitelisted);
-        table::add(&mut vault.whitelist, sender_email_hash, true);
-    }
-
-    public fun remove_from_whitelist(
-        vault:             &mut AttentionVault,
-        cap:               &VaultCap,
-        sender_email_hash: vector<u8>,
-        ctx:               &mut TxContext,
-    ) {
-        assert!(cap.vault_id == object::id(vault), ENotOwner);
-        assert!(ctx.sender() == vault.owner, ENotOwner);
-        assert!(table::contains(&vault.whitelist, sender_email_hash), ENotWhitelisted);
-        table::remove(&mut vault.whitelist, sender_email_hash);
     }
 
     public fun update_profile(
@@ -677,9 +746,6 @@ module attentionmarket::attention_market {
     public fun is_vault_active(vault: &AttentionVault): bool { vault.active }
     public fun is_thread_closed(vault: &AttentionVault, payment_id: &vector<u8>): bool {
         table::contains(&vault.closed_threads, *payment_id)
-    }
-    public fun is_whitelisted(vault: &AttentionVault, email_hash: &vector<u8>): bool {
-        table::contains(&vault.whitelist, *email_hash)
     }
     public fun slots_available(vault: &AttentionVault): u64 {
         let mut count = 0u64;
