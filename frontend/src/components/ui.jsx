@@ -1,9 +1,19 @@
 // components/ui.jsx — shared design system components
 
 export function Logo({ size = 'md' }) {
-  const sz = size === 'sm' ? '16px' : size === 'lg' ? '32px' : '22px'
+  const sz = size === 'sm' ? '16px' : size === 'lg' ? 'clamp(20px, 7vw, 32px)' : '22px'
+
   return (
-    <span style={{ fontFamily: 'var(--font-display)', fontSize: sz, fontWeight: 800, letterSpacing: '-0.02em' }}>
+    <span style={{
+      fontFamily: 'var(--font-display)',
+      fontSize: sz,
+      fontWeight: 800,
+      letterSpacing: '-0.02em',
+      display: 'inline-flex',
+      flexWrap: 'wrap',
+      justifyContent: 'center',
+      lineHeight: 1.1,
+    }}>
       <span style={{ color: 'var(--accent)' }}>ATTENTION</span>
       <span style={{ color: 'var(--text)' }}>MARKET</span>
     </span>
