@@ -5,7 +5,7 @@ import { Transaction } from '@mysten/sui/transactions'
 import { sha256 } from 'js-sha256'
 import { fetchVault, fetchEpochInfo, categoryById, mistToSui, suiToMist, PACKAGE_ID, REGISTRY_ID } from '../lib/sui.js'
 import { Card, Btn, Input, Tag, Spinner, PageWrap, SectionLabel, StatNum } from '../components/ui.jsx'
-
+import EmailVerificationBadge from '../components/EmailVerificationBadge.jsx'
 function hexToBytes(hex) {
   const bytes = new Uint8Array(hex.length / 2)
   for (let i = 0; i < bytes.length; i++) {
@@ -56,19 +56,19 @@ function EpochTimer({ vault, epochInfo }) {
 
   if (msLeft === null) return null
 
-  const expired  = msLeft <= 0
+  const expired = msLeft <= 0
   const urgentMs = 6 * 60 * 60 * 1000  // last 6 hours → amber
-  const urgent   = !expired && msLeft < urgentMs
+  const urgent = !expired && msLeft < urgentMs
 
-  const bg     = expired ? 'color-mix(in srgb, var(--red) 8%, transparent)'
-               : urgent  ? 'color-mix(in srgb, var(--amber) 8%, transparent)'
-               :           'color-mix(in srgb, var(--teal) 8%, transparent)'
+  const bg = expired ? 'color-mix(in srgb, var(--red) 8%, transparent)'
+    : urgent ? 'color-mix(in srgb, var(--amber) 8%, transparent)'
+      : 'color-mix(in srgb, var(--teal) 8%, transparent)'
   const border = expired ? 'color-mix(in srgb, var(--red) 25%, transparent)'
-               : urgent  ? 'color-mix(in srgb, var(--amber) 25%, transparent)'
-               :           'color-mix(in srgb, var(--teal) 25%, transparent)'
-  const color  = expired ? 'var(--red)'
-               : urgent  ? 'var(--amber)'
-               :           'var(--teal)'
+    : urgent ? 'color-mix(in srgb, var(--amber) 25%, transparent)'
+      : 'color-mix(in srgb, var(--teal) 25%, transparent)'
+  const color = expired ? 'var(--red)'
+    : urgent ? 'var(--amber)'
+      : 'var(--teal)'
 
   return (
     <div style={{
@@ -155,20 +155,20 @@ function BidSuccessPanel({ txDigest }) {
 }
 
 export default function Profile() {
-  const { vaultId }  = useParams()
-  const nav          = useNavigate()
-  const account      = useCurrentAccount()
-  
+  const { vaultId } = useParams()
+  const nav = useNavigate()
+  const account = useCurrentAccount()
+
   const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction()
 
-  const [vault,      setVault]      = useState(null)
-  const [epochInfo,  setEpochInfo]  = useState(null)
-  const [loading,    setLoading]    = useState(true)
-  const [bidEmail,   setBidEmail]   = useState('')
-  const [bidAmount,  setBidAmount]  = useState('')
-  const [step,       setStep]       = useState('idle') // idle | bidding | placed | error
-  const [txDigest,   setTxDigest]   = useState('')
-  const [errMsg,     setErrMsg]     = useState('')
+  const [vault, setVault] = useState(null)
+  const [epochInfo, setEpochInfo] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [bidEmail, setBidEmail] = useState('')
+  const [bidAmount, setBidAmount] = useState('')
+  const [step, setStep] = useState('idle') // idle | bidding | placed | error
+  const [txDigest, setTxDigest] = useState('')
+  const [errMsg, setErrMsg] = useState('')
 
   useEffect(() => { load() }, [vaultId])
 
@@ -195,12 +195,12 @@ export default function Profile() {
     setStep('bidding')
     setErrMsg('')
     try {
-      const emailHash      = sha256(bidEmail.toLowerCase().trim())
-      const pid            = sha256(`${emailHash}:${vaultId}`)
-      const pidBytes       = hexToBytes(pid)
+      const emailHash = sha256(bidEmail.toLowerCase().trim())
+      const pid = sha256(`${emailHash}:${vaultId}`)
+      const pidBytes = hexToBytes(pid)
       const emailHashBytes = hexToBytes(emailHash)
 
-      const tx   = new Transaction()
+      const tx = new Transaction()
       const coin = tx.splitCoins(tx.gas, [suiToMist(bidAmount)])
       tx.moveCall({
         target: `${PACKAGE_ID}::attention_market::bid`,
@@ -224,11 +224,11 @@ export default function Profile() {
   }
 
   if (loading) return <PageWrap><div style={{ display: 'flex', justifyContent: 'center', padding: '80px' }}><Spinner /></div></PageWrap>
-  if (!vault)  return <PageWrap><div style={{ textAlign: 'center', padding: '80px' }}><div style={{ fontFamily: 'var(--font-display)', fontSize: '20px' }}>Vault not found</div></div></PageWrap>
+  if (!vault) return <PageWrap><div style={{ textAlign: 'center', padding: '80px' }}><div style={{ fontFamily: 'var(--font-display)', fontSize: '20px' }}>Vault not found</div></div></PageWrap>
 
-  const cat      = categoryById(vault.category)
-  const full     = vault.slotsAvailable === 0
-  const minBid   = mistToSui(vault.lowestBid)
+  const cat = categoryById(vault.category)
+  const full = vault.slotsAvailable === 0
+  const minBid = mistToSui(vault.lowestBid)
   const bidValid = bidEmail.includes('@') && (parseFloat(bidAmount) || 0) >= parseFloat(minBid)
 
   return (
@@ -346,6 +346,7 @@ export default function Profile() {
                       placeholder="you@example.com"
                       type="email"
                     />
+                    <EmailVerificationBadge email={bidEmail} />
                     <div style={{
                       display: 'flex', alignItems: 'flex-start', gap: '7px',
                       marginTop: '8px', padding: '8px 12px',
@@ -378,8 +379,8 @@ export default function Profile() {
                   {!account
                     ? <div style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text3)' }}>Connect your wallet to bid</div>
                     : <Btn onClick={placeBid} disabled={!bidValid || step === 'bidding'} style={{ width: '100%', padding: '13px' }}>
-                        {step === 'bidding' ? 'Confirm in wallet…' : `Bid ${bidAmount || '—'} SUI →`}
-                      </Btn>
+                      {step === 'bidding' ? 'Confirm in wallet…' : `Bid ${bidAmount || '—'} SUI →`}
+                    </Btn>
                   }
                 </div>
 

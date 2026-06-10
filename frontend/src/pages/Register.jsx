@@ -6,6 +6,7 @@ import { PACKAGE_ID, REGISTRY_ID, CATEGORIES, suiToMist } from '../lib/sui.js'
 import { encryptEmail } from '../lib/encrypt.js'
 import { Card, Btn, Input, Textarea, PageWrap, SectionLabel } from '../components/ui.jsx'
 import { bcs } from '@mysten/sui/bcs'
+import EmailVerificationBadge from "../components/EmailVerificationBadge";
 // Base64 string → Uint8Array (needed to pass encrypted blobs as vector<u8>)
 function base64ToBytes(b64) {
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
@@ -242,7 +243,7 @@ export default function Register() {
             placeholder="alice@gmail.com"
             type="email"
           />
-
+          <EmailVerificationBadge email={form.realEmail} />
           {/* Live status indicator: shows when email looks valid */}
           {form.realEmail.includes('@') && (
             <div style={{
