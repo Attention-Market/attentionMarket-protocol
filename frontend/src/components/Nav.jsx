@@ -55,10 +55,7 @@ export default function Nav() {
         justifyContent: 'space-between',
         height: '56px',
       }}>
-        {/* Logo */}
-        <Link to="/" onClick={() => setMenuOpen(false)}>
-          <Logo size="sm" />
-        </Link>
+    
 
         {/* Desktop links */}
         <div style={{
