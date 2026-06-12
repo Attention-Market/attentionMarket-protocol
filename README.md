@@ -65,18 +65,6 @@ The **email forwarder gateway** sits in front of the seller's real inbox:
 
 ---
 
-### 5. Email verification service
-
-The **email verification service** sits between the bidder's browser and the bid transaction. It:
-
-1. Receives the bidder's claimed sender email.
-2. Sends a one-time verification code to that address.
-3. On confirmation, returns a signed attestation containing `sha256(email)` and the derived `payment_id`.
-
-The frontend includes this attestation in the bid transaction so the contract can record the hash without ever seeing the plaintext address.
-
----
-
 ## Privacy Model
 
 | Data | Where it lives | Who can read it |
