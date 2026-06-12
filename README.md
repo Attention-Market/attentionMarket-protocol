@@ -1,212 +1,166 @@
-# Attention Market - SpamShield 🛡️
-### Micropayment email filter on Sui
+# AttentionMarket
 
-> *Spam is free. SpamShield makes it cost $0.01.*
+> **Bid for attention. Pay only if you win. Prove delivery on-chain.**
 
-SpamShield is a programmable email filter that requires a Sui micropayment before any email reaches your inbox. Spammers sending millions of emails face an insurmountable economic wall. Legitimate senders pay once — an invisible cost — and their email arrives instantly.
-
-Built for the **Programmable Money, Payments & Financial Systems on Sui** hackathon track.
+AttentionMarket is a decentralised attention auction marketplace built on **Sui**. It lets anyone bid SUI for a guaranteed slot in a seller's inbox — without the seller ever exposing their real email address on-chain.
 
 ---
 
-## How it works
+## How It Works
 
-```
-Sender → SMTP Gateway → Payment check → Deliver (paid/whitelisted)
-                                     ↓
-                               Quarantine → Bounce with pay link
-                                     ↓
-                            Sender pays on Sui
-                                     ↓
-                         EmailPaid event emitted
-                                     ↓
-                         Event listener releases email
-```
+### 1. Sellers register a vault
 
-1. **Email arrives** at your SpamShield SMTP gateway
-2. **Gateway computes** a deterministic `payment_id = sha256(sender + recipient + emailHash)`
-3. **Sui RPC check**: has this payment_id been paid on-chain?
-   - **Yes / whitelisted** → deliver immediately
-   - **No** → quarantine + send bounce email with a pay link
-4. **Sender clicks the link**, connects their Sui wallet, pays ~0.01 SUI
-5. **Move contract** records the payment and emits an `EmailPaid` event
-6. **Event listener** catches it, releases the email from quarantine, delivers it
-7. **Recipient earns** the fee — withdrawable anytime from their vault
+A seller (creator, expert, professional) deploys an **AttentionVault** by calling `register()`. They set:
+
+- A **public gateway email** — the MX address bidders see and that the email forwarder listens on.
+- Their **real inbox** — stored on-chain as an ECDH / AES-GCM encrypted blob. Only the gateway's private key can decrypt it.
+- A **floor bid** (minimum 0.001 SUI), **slots per epoch** (up to 100), and **epoch duration**.
+
+The vault becomes a shared Sui object. The seller receives a `VaultCap` capability object that gates all privileged actions.
 
 ---
 
-## Architecture
+### 2. Bidders compete for slots
 
-```
-spamshield/
-├── move/                   # Sui Move smart contract
-│   ├── Move.toml
-│   └── sources/
-│       └── email_payment.move   # RecipientVault, pay_for_email, events
-│
-├── gateway/                # Node.js SMTP gateway + API
-│   ├── src/
-│   │   ├── index.js        # Entry point
-│   │   ├── smtp-server.js  # Intercepts incoming SMTP
-│   │   ├── sui-client.js   # Sui RPC + event helpers
-│   │   ├── quarantine.js   # In-memory email store
-│   │   ├── event-listener.js  # Polls for EmailPaid events
-│   │   ├── mailer.js       # Sends bounces + delivers released mail
-│   │   └── api.js          # REST API for dashboard
-│   ├── package.json
-│   └── .env.example
-│
-├── frontend/               # React dashboard + payment page
-│   ├── src/
-│   │   ├── main.jsx        # Sui wallet providers + router
-│   │   ├── Dashboard.jsx   # Recipient's quarantine dashboard
-│   │   ├── PayPage.jsx     # Sender's payment flow
-│   │   └── index.css       # Design system
-│   ├── package.json
-│   └── vite.config.js
-│
-└── deploy.sh               # One-command contract deployment
-```
+Anyone can call `bid()` during the open bidding window. Under the hood:
 
----
+1. **Expired bids are swept first** — any bid placed 10+ epochs ago is refunded on the spot.
+2. **If a slot is open** — the bid fills it immediately.
+3. **If all slots are full** — the bid must beat the current lowest bid. The displaced bidder is refunded **immediately** via an on-chain transfer. No claim step needed.
 
-## Quick start
+Each bid records:
 
-### Prerequisites
-- [Sui CLI](https://docs.sui.io/guides/developer/getting-started/sui-install) installed
-- Node.js 20+
-- A Sui testnet wallet with some SUI ([faucet](https://faucet.sui.io))
-- A Gmail account (or any SMTP provider) for outbound mail
-
-### 1. Deploy the Move contract
-
-```bash
-chmod +x deploy.sh
-./deploy.sh
-```
-
-This publishes the contract to testnet, creates your `RecipientVault`, and prints the IDs you'll need.
-
-### 2. Configure the gateway
-
-```bash
-cd gateway
-cp .env.example .env
-# Edit .env with your IDs from deploy.sh output + SMTP credentials
-npm install
-npm start
-```
-
-### 3. Start the frontend
-
-```bash
-cd frontend
-cp .env.example .env
-# Set VITE_PACKAGE_ID from deploy output
-npm install
-npm run dev
-```
-
-### 4. Test it
-
-```bash
-# Send a test email to the gateway (it listens on port 2525)
-curl --url 'smtp://localhost:2525' \
-  --mail-from 'spammer@example.com' \
-  --mail-rcpt 'you@yoursite.com' \
-  --upload-file - << 'EOF'
-From: spammer@example.com
-To: you@yoursite.com
-Subject: Buy my crypto course
-
-You definitely want this.
-EOF
-```
-
-You'll get a bounce email with a pay link. Open it, connect Sui wallet, pay, and watch the email release.
-
----
-
-## Move contract
-
-### Key objects
-
-**`RecipientVault`** (shared object, one per protected inbox)
-```move
-public struct RecipientVault has key {
-    id: UID,
-    owner: address,
-    payments: Table<vector<u8>, u64>,  // payment_id → amount
-    whitelist: Table<String, bool>,     // sender_email → allowed
-    balance: u64,                       // earned MIST
-    min_payment: u64,                   // configurable threshold
-}
-```
-
-**`VaultCap`** (owned by recipient, required for admin actions)
-
-### Key functions
-
-| Function | Caller | Description |
-|---|---|---|
-| `create_vault()` | Recipient | Deploy once, get VaultCap |
-| `pay_for_email(vault, payment_id, sender_email, coin)` | Sender | Pay to release email |
-| `add_to_whitelist(vault, cap, email)` | Recipient | Bypass payment for trusted senders |
-| `withdraw(vault, cap)` | Recipient | Claim earned SUI |
-| `set_min_payment(vault, cap, amount)` | Recipient | Change fee threshold |
-
-### Events
-
-| Event | When | Contains |
-|---|---|---|
-| `EmailPaid` | Payment recorded | `payment_id`, `sender_email`, `recipient`, `amount` |
-| `FundsWithdrawn` | Recipient withdraws | `recipient`, `amount` |
-| `WhitelistUpdated` | Whitelist changes | `sender_email`, `added` |
-
----
-
-## Why Sui makes this possible
-
-| Sui feature | How SpamShield uses it |
+| Field | What it stores |
 |---|---|
-| **Shared objects** | RecipientVault accessible by any sender globally |
-| **PTBs** | Sender can `split coin + pay_for_email` atomically |
-| **Sub-cent fees** | ~$0.001 gas makes micropayments economical |
-| **On-chain events** | Gateway reacts to payments without polling state |
-| **Strong ownership** | VaultCap enforces that only recipient can withdraw |
-| **Type safety** | Move prevents double-payments via Table key uniqueness |
+| `sender_email_hash` | `sha256(bidder_email)` — email is never stored in plaintext |
+| `payment_id` | `sha256(emailHash + ":" + vaultId)` — used to route delivery |
+| `bid_epoch` | The vault epoch in which the bid was placed |
+
+A `BidPlaced` event is emitted and indexed by the frontend.
 
 ---
 
-## Economic model
+### 3. Seller settles the epoch
 
-- **Spam economics**: 1M emails/day × $0.01 = $10,000/day cost for spammers → impossible
-- **Legitimate sender**: one email = $0.01 = invisible
-- **Recipient earns**: every email that passes through earns them SUI
-- **Whitelist**: zero friction for known contacts
+Once the epoch window closes, the seller calls `settle_epoch()`. This:
 
----
+- Mints a **soulbound `AttentionReceipt`** to every winning slot holder.
+- Resets all slots and increments the epoch counter.
+- Deducts the platform fee (up to 10%, set in basis points on the `Registry`), then transfers the net proceeds directly to the vault owner.
 
-## Hackathon track alignment
-
-**Trust-Minimized Finance** — enforcement is fully on-chain. The recipient never needs to trust the gateway; the Move contract is the source of truth.
-
-**Payments & Consumer Finance** — real-world product with a clear UX story and measurable economic impact.
-
-**Novel PTB usage** — `split_coin → pay_for_email` in one atomic transaction.
+The `AttentionReceipt` is non-transferable (`key` only, no `store`). It contains the `payment_id`, `gateway_email`, seller name, and the amount paid.
 
 ---
 
-## Production roadmap
+### 4. Winners get through
 
-- [ ] Store `Coin<SUI>` inside the vault object for real withdrawals
-- [ ] MX record integration (proper email routing)
-- [ ] TLS/STARTTLS support in SMTP gateway
-- [ ] Persistent quarantine store (Redis/SQLite)
-- [ ] On-chain whitelist sync (poll `WhitelistUpdated` events)
-- [ ] Multi-recipient support (one vault per domain)
-- [ ] zkLogin integration (senders pay without a pre-existing wallet)
-- [ ] Retroactive payment streaming (earned fees auto-invested in yield vault)
+A winner uses their `AttentionReceipt` to **sign a delivery token** on the frontend at any time. The frontend generates a signed JWT / bearer token embedding the `payment_id`.
+
+The **email forwarder gateway** sits in front of the seller's real inbox:
+
+1. An incoming email arrives at `gateway_email`.
+2. The gateway checks the sender's `payment_id` against on-chain state — verifying the receipt is valid and the thread hasn't been closed.
+3. If valid, the gateway decrypts the seller's real inbox address using the ECDH private key and forwards the email.
+4. If the `payment_id` has been closed via `close_conversation()`, the gateway permanently rejects it.
+
+---
+
+### 5. Email verification service
+
+The **email verification service** sits between the bidder's browser and the bid transaction. It:
+
+1. Receives the bidder's claimed sender email.
+2. Sends a one-time verification code to that address.
+3. On confirmation, returns a signed attestation containing `sha256(email)` and the derived `payment_id`.
+
+The frontend includes this attestation in the bid transaction so the contract can record the hash without ever seeing the plaintext address.
+
+---
+
+## Privacy Model
+
+| Data | Where it lives | Who can read it |
+|---|---|---|
+| Seller's real inbox | On-chain, ECDH-encrypted | Gateway only (holds private key) |
+| `gateway_email` | On-chain, plaintext | Everyone — it's public |
+| Bidder's email | Off-chain | Bidder only |
+| `sender_email_hash` | On-chain as `sha256(email)` | Anyone, but not reversible |
+| `payment_id` | On-chain as `sha256(emailHash + ":" + vaultId)` | Anyone, but not reversible |
+
+---
+
+## Fee Model
+
+- Platform fees are configured on the `Registry` by the deployer (`PlatformCap` holder).
+- Fee is expressed in **basis points** (max 1000 = 10%). Default is 0.
+- Fees are deducted at `settle_epoch()` and `withdraw()` and sent to the `fee_recipient` address.
+
+---
+
+## Seller Controls
+
+| Action | Function | Effect |
+|---|---|---|
+| Settle an epoch | `settle_epoch()` | Mints receipts, pays seller, resets slots |
+| Close a conversation | `close_conversation()` | Permanently invalidates a `payment_id` at the gateway |
+| Withdraw residual balance | `withdraw()` | Pulls any remaining SUI after expired-bid sweeps |
+| Update profile | `update_profile()` | Name, bio, category, social handle, gateway email |
+| Update auction params | `update_auction_params()` | Floor bid, slots, epoch duration |
+| Rotate encrypted inbox | `update_encrypted_email()` | Re-encrypts to a new ephemeral keypair |
+| Close vault | `close_vault()` | Refunds all active bidders, deletes vault and cap |
+
+---
+
+## Expiry & Refunds
+
+Bids that remain unsettled for **10 or more epochs** beyond their auction epoch can be refunded by anyone calling `refund_expired_bids()`. This protects bidders if a seller goes dark.
+
+---
+
+## Contract Overview
+
+```
+attentionmarket::attention_market
+├── Registry            — shared global object; vault index + fee config
+├── AttentionVault      — shared per-seller object; holds bids + encrypted inbox
+├── VaultCap            — owned by seller; required for privileged actions
+├── AttentionReceipt    — soulbound; minted to winners at settle_epoch()
+└── PlatformCap         — owned by deployer; controls fee settings
+```
+
+### Key constants
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `GLOBAL_FLOOR` | 1,000,000 MIST | Minimum bid (0.001 SUI) |
+| `MAX_SLOTS` | 100 | Max slots per epoch |
+| `REFUND_AFTER_EPOCHS` | 10 | Epochs before a bid can be expired-refunded |
+| `MAX_FEE_BPS` | 1,000 | Platform fee cap (10%) |
+
+---
+
+## System Architecture
+
+```
+┌─────────────┐     bid tx          ┌──────────────────┐
+│   Bidder    │ ──────────────────► │   Sui Network    │
+│  (browser)  │                     │  AttentionVault  │
+└──────┬──────┘                     └────────┬─────────┘
+       │ email verify                        │ settle_epoch()
+       ▼                                     ▼
+┌─────────────────┐              ┌──────────────────────┐
+│  Verification   │              │   AttentionReceipt   │
+│    Service      │              │   (soulbound NFT)    │
+└─────────────────┘              └──────────┬───────────┘
+                                            │ sign delivery token
+                                            ▼
+┌─────────────┐   signed token   ┌──────────────────────┐
+│   Winner    │ ───────────────► │  Gateway / Forwarder │
+│  (browser)  │                  │  (checks payment_id, │
+└─────────────┘                  │  decrypts real inbox,│
+                                 │  forwards email)     │
+                                 └──────────────────────┘
+```
 
 ---
 
